@@ -36,6 +36,7 @@
     "prepare": "simple-git-hooks",
     "release": "bumpp && bun publish --access public",
     "start": "NODE_USE_SYSTEM_CA=1 NODE_ENV=production bun run ./src/main.ts",
+    "start:latest": "git fetch origin dev && git rebase origin/dev && NODE_USE_SYSTEM_CA=1 NODE_ENV=production bun run ./src/main.ts start --verbose",
     "typecheck": "tsc"
   },
   "simple-git-hooks": {

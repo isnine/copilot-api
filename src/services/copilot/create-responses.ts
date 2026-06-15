@@ -581,6 +581,14 @@ interface ResponsesRequestOptions {
   transport?: ResponsesTransport
 }
 
+interface ResponsesStreamDiagnostics {
+  contentType?: string | null
+  model: string
+  requestId: string
+  status?: number
+  transport: ResponsesTransport
+}
+
 export const createResponses = async (
   payload: ResponsesPayload,
   {
@@ -621,24 +629,47 @@ export const createResponses = async (
         subagentMarker,
       },
     )
-    const stream = createPooledResponsesWebSocketStream(websocketRequest)
+    const stream = createPooledResponsesWebSocketStream(websocketRequest, {
+      model: payload.model,
+      requestId,
+      transport: "websocket",
+    })
     return stream
   }
 
-  return await createHttpResponses(payload, headers)
+  return await createHttpResponses(payload, headers, {
+    model: payload.model,
+    requestId,
+    transport: "http",
+  })
 }
 
 const createHttpResponses = async (
   payload: ResponsesPayload,
   headers: Record<string, string>,
+  diagnostics: ResponsesStreamDiagnostics,
 ): Promise<CreateResponsesReturn> => {
+  const body = JSON.stringify(payload)
+  consola.info("Responses HTTP request body", {
+    ...diagnostics,
+    rawBytes: new TextEncoder().encode(body).byteLength,
+  })
   const response = await fetch(`${copilotBaseUrl(state)}/responses`, {
     method: "POST",
     headers,
-    body: JSON.stringify(payload),
+    body,
   })
 
   logCopilotRateLimits(response.headers)
+  const contentType = response.headers.get("content-type")
+  consola.info("Responses HTTP response", {
+    contentType,
+    model: diagnostics.model,
+    ok: response.ok,
+    requestId: diagnostics.requestId,
+    status: response.status,
+    stream: payload.stream === true,
+  })
 
   if (!response.ok) {
     consola.error("Failed to create responses", response)
@@ -646,7 +677,11 @@ const createHttpResponses = async (
   }
 
   if (payload.stream) {
-    return events(response)
+    return createResponsesSafeStream(events(response), {
+      ...diagnostics,
+      contentType,
+      status: response.status,
+    })
   }
 
   return (await response.json()) as ResponsesResult
@@ -715,6 +750,7 @@ export const getResponsesWebSocketInitiator = (
 
 const createPooledResponsesWebSocketStream = (
   request: ResponsesWebSocketRequest,
+  diagnostics: ResponsesStreamDiagnostics,
 ): ResponsesStream =>
   createResponsesSafeStream(
     createPooledWebSocketStream(request, {
@@ -725,14 +761,69 @@ const createPooledResponsesWebSocketStream = (
       terminalChunkMissingMessage:
         "Responses websocket ended without a terminal response",
     }),
+    diagnostics,
   )
 
 const createResponsesSafeStream = async function* (
   source: AsyncIterable<ResponsesStreamChunk>,
+  diagnostics: ResponsesStreamDiagnostics,
 ): AsyncGenerator<ResponsesStreamChunk, void, unknown> {
+  const startedAt = Date.now()
+  const lastEvents: Array<string> = []
+  let chunkCount = 0
+  let terminalEvent: string | undefined
+
+  consola.info("Responses stream started", diagnostics)
+
   try {
-    yield* source
+    for await (const chunk of source) {
+      chunkCount += 1
+      const summary = summarizeResponsesStreamChunk(chunk)
+      const eventType = summary.type ?? summary.event
+      if (typeof eventType === "string") {
+        lastEvents.push(eventType)
+        if (lastEvents.length > 8) {
+          lastEvents.shift()
+        }
+      }
+
+      if (isTerminalResponsesStreamChunk(chunk)) {
+        terminalEvent = typeof eventType === "string" ? eventType : "terminal"
+      }
+
+      consola.debug("Responses stream chunk", {
+        ...diagnostics,
+        chunkCount,
+        ...summary,
+      })
+
+      yield chunk
+    }
+
+    const streamSummary = {
+      ...diagnostics,
+      chunkCount,
+      durationMs: Date.now() - startedAt,
+      lastEvents,
+      terminalEvent,
+    }
+    if (terminalEvent) {
+      consola.info("Responses stream completed", streamSummary)
+    } else {
+      consola.warn(
+        "Responses stream ended before terminal response event",
+        streamSummary,
+      )
+    }
   } catch (error) {
+    consola.error("Responses stream failed", {
+      ...diagnostics,
+      chunkCount,
+      durationMs: Date.now() - startedAt,
+      error: getErrorMessage(error),
+      lastEvents,
+      terminalEvent,
+    })
     yield createResponsesErrorServerSentEventChunk(getErrorMessage(error))
   }
 }
@@ -842,6 +933,67 @@ const createResponsesErrorServerSentEventChunk = (
     event: errorEvent.type,
     data: JSON.stringify(errorEvent),
   }
+}
+
+const summarizeResponsesStreamChunk = (
+  chunk: ResponsesStreamChunk,
+): Record<string, unknown> => {
+  if (!chunk.data) {
+    return {
+      dataLength: 0,
+      event: chunk.event,
+      id: chunk.id,
+    }
+  }
+
+  if (chunk.data === "[DONE]") {
+    return {
+      dataLength: chunk.data.length,
+      event: chunk.event,
+      id: chunk.id,
+      type: "[DONE]",
+    }
+  }
+
+  try {
+    const parsed = JSON.parse(chunk.data) as {
+      code?: unknown
+      message?: unknown
+      response?: {
+        id?: unknown
+        status?: unknown
+      }
+      sequence_number?: unknown
+      type?: unknown
+    }
+
+    return {
+      code: parsed.code,
+      dataLength: chunk.data.length,
+      event: chunk.event,
+      id: chunk.id,
+      message: truncateLogValue(parsed.message),
+      responseId: parsed.response?.id,
+      responseStatus: parsed.response?.status,
+      sequenceNumber: parsed.sequence_number,
+      type: parsed.type,
+    }
+  } catch {
+    return {
+      dataLength: chunk.data.length,
+      event: chunk.event,
+      id: chunk.id,
+      parseError: true,
+    }
+  }
+}
+
+const truncateLogValue = (value: unknown): unknown => {
+  if (typeof value !== "string" || value.length <= 240) {
+    return value
+  }
+
+  return `${value.slice(0, 240)}...`
 }
 
 const getErrorMessage = (error: unknown): string => {

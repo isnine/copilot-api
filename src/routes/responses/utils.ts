@@ -20,6 +20,8 @@ import {
 export const RESPONSES_ENDPOINT = "/responses"
 export const RESPONSES_WS_ENDPOINT = "ws:/responses"
 export const DEFAULT_RESPONSES_COMPACT_THRESHOLD_RATIO = 0.85
+export const DEFAULT_RESPONSES_IMAGE_PAYLOAD_THRESHOLD_BYTES = 1_000_000
+const RESPONSES_WEBSOCKET_DISABLED_MODELS = new Set(["gpt-5.5"])
 export type ResponsesApiContextManagementSource = "messages" | "responses"
 
 export const responsesUtilsDependencies = {
@@ -44,6 +46,7 @@ export const getResponsesRequestOptions = (
 export const getResponsesTransportForModel = (
   selectedModel:
     | {
+        id?: string
         supported_endpoints?: Array<string>
       }
     | undefined,
@@ -54,6 +57,14 @@ export const getResponsesTransportForModel = (
   const supportedEndpoints = selectedModel?.supported_endpoints ?? []
   const useWebSocket =
     responsesUtilsDependencies.isResponsesApiWebSocketEnabled()
+
+  if (
+    selectedModel?.id
+    && RESPONSES_WEBSOCKET_DISABLED_MODELS.has(selectedModel.id)
+    && supportedEndpoints.includes(RESPONSES_ENDPOINT)
+  ) {
+    return "http"
+  }
 
   if (
     options.compactType !== COMPACT_REQUEST
@@ -136,6 +147,17 @@ export const sanitizeAllInputImages = (payload: ResponsesPayload): number => {
   }
 
   return sanitizeInputImages(payload.input, () => true)
+}
+
+export const sanitizeInputImagesForPayloadSize = (
+  payload: ResponsesPayload,
+  maxPayloadBytes = DEFAULT_RESPONSES_IMAGE_PAYLOAD_THRESHOLD_BYTES,
+): number => {
+  if (estimatePayloadByteLength(payload) <= maxPayloadBytes) {
+    return 0
+  }
+
+  return sanitizeAllInputImages(payload)
 }
 
 interface InputImageDataUrl {
@@ -221,6 +243,9 @@ const getInputImageDataUrl = (
 const estimateDataUrlByteLength = (value: string): number => {
   return Math.max(0, Math.floor((value.length * 3) / 4))
 }
+
+const estimatePayloadByteLength = (payload: ResponsesPayload): number =>
+  new TextEncoder().encode(JSON.stringify(payload)).byteLength
 
 const replaceInputImageWithPlaceholder = (image: InputImageDataUrl): void => {
   image.record.type = "input_image"

@@ -52,6 +52,7 @@ import { translateAnthropicMessagesToResponsesPayload } from "../responses-trans
 import {
   getResponsesRequestOptions,
   getResponsesTransportForModel,
+  sanitizeInputImagesForPayloadSize,
 } from "../../responses/utils"
 import {
   buildResponsesWebSearchTool,
@@ -467,6 +468,15 @@ export const handleWebSearchViaResponses = async (
     getResponsesTransportForModel(selectedModel, {
       compactType: options.compactType,
     }) ?? "http"
+  if (transport === "http") {
+    const sanitizedImageCount =
+      sanitizeInputImagesForPayloadSize(responsesPayload)
+    if (sanitizedImageCount > 0) {
+      logger.warn(
+        `Omitted ${sanitizedImageCount} input image(s) because the HTTP Responses payload remained too large`,
+      )
+    }
+  }
 
   debugJson(
     logger,

@@ -31,6 +31,7 @@ import {
   compactInputByLatestCompaction,
   getResponsesTransportForModel,
   getResponsesRequestOptions,
+  sanitizeInputImagesForPayloadSize,
   sanitizeOversizedInputImages,
 } from "./utils"
 import consola from "consola"
@@ -118,6 +119,16 @@ export const handleResponses = async (c: Context) => {
     )
   }
 
+  if (responsesTransport === "http") {
+    const payloadSizeSanitizedImageCount =
+      sanitizeInputImagesForPayloadSize(payload)
+    if (payloadSizeSanitizedImageCount > 0) {
+      logger.warn(
+        `Omitted ${payloadSizeSanitizedImageCount} input image(s) because the HTTP Responses payload remained too large`,
+      )
+    }
+  }
+
   // Smaller than the client compaction threshold, use server-side compaction to maintain cache hit rate
   const maxPromptTokens = selectedModel?.capabilities.limits.max_prompt_tokens
   const shouldCompactInput = applyResponsesApiContextManagement(
@@ -152,34 +163,73 @@ export const handleResponses = async (c: Context) => {
     return streamSSE(c, async (stream) => {
       const idTracker = createStreamIdTracker()
       let usage: UsageTokens = {}
+      let chunkCount = 0
+      let downstreamWriteCount = 0
+      let terminalEvent: string | undefined
+      let lastEventType: string | undefined
 
-      for await (const chunk of response) {
-        debugJson(logger, "Responses stream chunk:", chunk)
-        const parsedEvent = parseResponsesStreamEvent(chunk)
-        if (
-          parsedEvent?.type === "response.completed"
-          || parsedEvent?.type === "response.failed"
-          || parsedEvent?.type === "response.incomplete"
-        ) {
-          usage = {
-            ...normalizeResponsesUsage(parsedEvent.response.usage),
-            total_nano_aiu: normalizeOptionalToken(
-              parsedEvent.copilot_usage?.total_nano_aiu,
-            ),
+      try {
+        for await (const chunk of response) {
+          chunkCount += 1
+          debugJson(logger, "Responses stream chunk:", chunk)
+          const parsedEvent = parseResponsesStreamEvent(chunk)
+          lastEventType =
+            parsedEvent?.type ?? (chunk as { event?: string }).event
+          if (
+            parsedEvent?.type === "response.completed"
+            || parsedEvent?.type === "response.failed"
+            || parsedEvent?.type === "response.incomplete"
+          ) {
+            terminalEvent = parsedEvent.type
+            usage = {
+              ...normalizeResponsesUsage(parsedEvent.response.usage),
+              total_nano_aiu: normalizeOptionalToken(
+                parsedEvent.copilot_usage?.total_nano_aiu,
+              ),
+            }
+          } else if (parsedEvent?.type === "error") {
+            terminalEvent = parsedEvent.type
           }
+
+          const processedData = fixStreamIds(
+            (chunk as { data?: string }).data ?? "",
+            (chunk as { event?: string }).event,
+            idTracker,
+          )
+
+          await stream.writeSSE({
+            id: (chunk as { id?: string }).id,
+            event: (chunk as { event?: string }).event,
+            data: processedData,
+          })
+          downstreamWriteCount += 1
         }
 
-        const processedData = fixStreamIds(
-          (chunk as { data?: string }).data ?? "",
-          (chunk as { event?: string }).event,
-          idTracker,
-        )
-
-        await stream.writeSSE({
-          id: (chunk as { id?: string }).id,
-          event: (chunk as { event?: string }).event,
-          data: processedData,
+        const streamSummary = {
+          chunkCount,
+          downstreamWriteCount,
+          lastEventType,
+          requestId,
+          terminalEvent,
+        }
+        if (terminalEvent) {
+          logger.info("Responses downstream stream completed", streamSummary)
+        } else {
+          logger.warn(
+            "Responses downstream stream ended before terminal event",
+            streamSummary,
+          )
+        }
+      } catch (error) {
+        logger.error("Responses downstream stream failed", {
+          chunkCount,
+          downstreamWriteCount,
+          error: getErrorMessage(error),
+          lastEventType,
+          requestId,
+          terminalEvent,
         })
+        throw error
       }
 
       recordUsage(usage)
@@ -220,6 +270,14 @@ const parseResponsesStreamEvent = (
   } catch {
     return null
   }
+}
+
+const getErrorMessage = (error: unknown): string => {
+  if (error instanceof Error && error.message) {
+    return error.message
+  }
+
+  return String(error)
 }
 
 const removeWebSearchTool = (payload: ResponsesPayload): void => {

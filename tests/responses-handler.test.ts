@@ -208,6 +208,42 @@ describe("responses handler token usage", () => {
     expect(createResponses.mock.calls[0][1]?.transport).toBe("http")
   })
 
+  test("keeps HTTP transport for gpt-5.5 even when websocket is enabled", async () => {
+    state.models = {
+      object: "list",
+      data: [
+        {
+          capabilities: {
+            limits: {
+              max_prompt_tokens: 128000,
+            },
+          },
+          id: "gpt-5.5",
+          supported_endpoints: ["/responses", "ws:/responses"],
+        },
+      ],
+    } as typeof state.models
+    createResponses.mockImplementation((payload) =>
+      Promise.resolve(createResponsesResult(payload.model)),
+    )
+
+    const app = createApp()
+    const response = await app.request("/v1/responses", {
+      body: JSON.stringify({
+        input: "hello",
+        model: "gpt-5.5",
+      }),
+      headers: {
+        "content-type": "application/json",
+      },
+      method: "POST",
+    })
+
+    expect(response.status).toBe(200)
+    expect(createResponses).toHaveBeenCalledTimes(1)
+    expect(createResponses.mock.calls[0][1]?.transport).toBe("http")
+  })
+
   test("keeps HTTP transport when the selected model only supports /responses", async () => {
     createResponses.mockImplementation((payload) =>
       Promise.resolve(createResponsesResult(payload.model)),
@@ -786,6 +822,70 @@ describe("responses handler token usage", () => {
         role: "user",
       },
     ])
+  })
+
+  test("omits all input images when HTTP fallback payload remains too large", async () => {
+    responsesApiWebSocketEnabled = false
+    state.models = {
+      object: "list",
+      data: [
+        {
+          capabilities: {
+            limits: {
+              max_prompt_tokens: 128000,
+              vision: {
+                max_prompt_image_size: 1_000_000,
+              },
+            },
+          },
+          id: "gpt-5.5",
+          supported_endpoints: ["/responses", "ws:/responses"],
+        },
+      ],
+    } as typeof state.models
+    createResponses.mockImplementation((payload) =>
+      Promise.resolve(createResponsesResult(payload.model)),
+    )
+
+    const firstImageUrl = `data:image/png;base64,${"A".repeat(600_000)}`
+    const secondImageUrl = `data:image/png;base64,${"B".repeat(600_000)}`
+
+    const app = createApp()
+    const response = await app.request("/v1/responses", {
+      body: JSON.stringify({
+        input: [
+          {
+            content: [
+              { text: "look", type: "input_text" },
+              {
+                detail: "low",
+                image_url: firstImageUrl,
+                type: "input_image",
+              },
+              {
+                detail: "low",
+                image_url: secondImageUrl,
+                type: "input_image",
+              },
+            ],
+            role: "user",
+          },
+        ],
+        model: "gpt-5.5",
+      }),
+      headers: {
+        "content-type": "application/json",
+      },
+      method: "POST",
+    })
+
+    expect(response.status).toBe(200)
+    expect(createResponses).toHaveBeenCalledTimes(1)
+    expect(createResponses.mock.calls[0][1]?.transport).toBe("http")
+    const forwarded = JSON.stringify(createResponses.mock.calls[0][0])
+    expect(forwarded).not.toContain(firstImageUrl)
+    expect(forwarded).not.toContain(secondImageUrl)
+    expect(forwarded.length).toBeLessThan(1_000_000)
   })
 
   test("records usage from failed streaming responses and falls back to interaction id", async () => {
