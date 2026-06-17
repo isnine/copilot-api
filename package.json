@@ -36,7 +36,7 @@
     "prepare": "simple-git-hooks",
     "release": "bumpp && bun publish --access public",
     "start": "NODE_USE_SYSTEM_CA=1 NODE_ENV=production bun run ./src/main.ts",
-    "start:latest": "git pull --rebase --autostash && bun install --frozen-lockfile && NODE_USE_SYSTEM_CA=1 NODE_ENV=production bun run ./src/main.ts start --verbose",
+    "start:latest": "git pull --rebase --autostash && bun install --frozen-lockfile && NODE_USE_SYSTEM_CA=1 NODE_ENV=production bun run ./src/main.ts start",
     "typecheck": "tsc"
   },
   "simple-git-hooks": {

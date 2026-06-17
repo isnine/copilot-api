@@ -204,9 +204,11 @@ export const createHandlerLogger = (name: string): ConsolaInstance => {
   const sanitizedName = sanitizeName(name)
   const instance = consola.withTag(name)
 
-  if (state.verbose) {
-    instance.level = 5
+  if (!state.verbose) {
+    return instance
   }
+
+  instance.level = 5
   instance.setReporters([])
 
   instance.addReporter({
