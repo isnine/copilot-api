@@ -143,6 +143,7 @@ export const handleResponses = async (c: Context) => {
     compactInputByLatestCompaction(payload)
   }
 
+  aliasReservedNamespacesForUpstream(payload)
   debugJson(logger, "Translated Responses payload:", payload)
 
   const { vision, initiator: inferredInitiator } =
@@ -191,10 +192,12 @@ export const handleResponses = async (c: Context) => {
             terminalEvent = parsedEvent.type
           }
 
-          const processedData = fixStreamIds(
-            (chunk as { data?: string }).data ?? "",
-            (chunk as { event?: string }).event,
-            idTracker,
+          const processedData = restoreReservedNamespacesInJson(
+            fixStreamIds(
+              (chunk as { data?: string }).data ?? "",
+              (chunk as { event?: string }).event,
+              idTracker,
+            ),
           )
 
           await stream.writeSSE({
@@ -241,6 +244,7 @@ export const handleResponses = async (c: Context) => {
     tailLength: 400,
   })
   const result = response as ResponsesResult
+  restoreReservedNamespacesForClient(result)
   recordUsage({
     ...normalizeResponsesUsage(result.usage),
     total_nano_aiu: normalizeOptionalToken(
@@ -290,6 +294,13 @@ const removeWebSearchTool = (payload: ResponsesPayload): void => {
 
 const COPILOT_UNSUPPORTED_TOOL_TYPES = new Set(["image_generation"])
 
+const RESERVED_NAMESPACE_ALIASES = new Map([
+  ["image_gen", "copilot_api_user_image_gen"],
+])
+const RESERVED_NAMESPACE_REVERSE_ALIASES = new Map(
+  [...RESERVED_NAMESPACE_ALIASES].map(([from, to]) => [to, from]),
+)
+
 export const removeUnsupportedTools = (payload: ResponsesPayload): void => {
   if (!Array.isArray(payload.tools) || payload.tools.length === 0) return
 
@@ -306,6 +317,61 @@ export const removeUnsupportedTools = (payload: ResponsesPayload): void => {
     logger.debug("Removed unsupported tools:", dropped)
   }
 }
+
+const aliasReservedNamespacesForUpstream = (
+  payload: ResponsesPayload,
+): void => {
+  rewriteReservedNamespaces(payload, RESERVED_NAMESPACE_ALIASES)
+}
+
+const restoreReservedNamespacesForClient = (value: unknown): void => {
+  rewriteReservedNamespaces(value, RESERVED_NAMESPACE_REVERSE_ALIASES)
+}
+
+const restoreReservedNamespacesInJson = (data: string): string => {
+  if (!data || data === "[DONE]") {
+    return data
+  }
+
+  try {
+    const parsed = JSON.parse(data) as unknown
+    restoreReservedNamespacesForClient(parsed)
+    return JSON.stringify(parsed)
+  } catch {
+    return data
+  }
+}
+
+const rewriteReservedNamespaces = (
+  value: unknown,
+  aliases: ReadonlyMap<string, string>,
+): void => {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      rewriteReservedNamespaces(item, aliases)
+    }
+    return
+  }
+
+  if (!isRecord(value)) {
+    return
+  }
+
+  if (value.type === "namespace" && typeof value.name === "string") {
+    value.name = aliases.get(value.name) ?? value.name
+  }
+
+  if (value.type === "function_call" && typeof value.namespace === "string") {
+    value.namespace = aliases.get(value.namespace) ?? value.namespace
+  }
+
+  for (const item of Object.values(value)) {
+    rewriteReservedNamespaces(item, aliases)
+  }
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null
 
 const getIncomingResponsesSessionId = (c: Context): string | undefined =>
   getTrimmedHeader(c, "session-id") ?? getTrimmedHeader(c, "x-session-id")

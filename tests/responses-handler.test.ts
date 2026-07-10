@@ -483,6 +483,74 @@ describe("responses handler token usage", () => {
     expect(createResponses.mock.calls[0][0].tools?.[0]).toEqual(applyPatchTool)
   })
 
+  test("aliases reserved image_gen namespace upstream and restores it in response", async () => {
+    createResponses.mockImplementation((payload) =>
+      Promise.resolve({
+        ...createResponsesResult(payload.model),
+        output: [
+          {
+            arguments: "{}",
+            call_id: "call-image",
+            name: "generate",
+            namespace: "copilot_api_user_image_gen",
+            type: "function_call",
+          },
+        ],
+      }),
+    )
+
+    const app = createApp()
+    const response = await app.request("/v1/responses", {
+      body: JSON.stringify({
+        input: [
+          {
+            arguments: "{}",
+            call_id: "call-image",
+            name: "generate",
+            namespace: "image_gen",
+            type: "function_call",
+          },
+        ],
+        model: "gpt-test",
+        tools: [
+          {
+            name: "image_gen",
+            tools: [
+              {
+                name: "generate",
+                parameters: {},
+                strict: false,
+                type: "function",
+              },
+            ],
+            type: "namespace",
+          },
+        ],
+      }),
+      headers: {
+        "content-type": "application/json",
+      },
+      method: "POST",
+    })
+
+    expect(response.status).toBe(200)
+    expect(createResponses).toHaveBeenCalledTimes(1)
+    expect(createResponses.mock.calls[0][0].tools?.[0]).toMatchObject({
+      name: "copilot_api_user_image_gen",
+      type: "namespace",
+    })
+    expect(
+      (
+        createResponses.mock.calls[0][0].input as Array<{ namespace?: string }>
+      )[0].namespace,
+    ).toBe("copilot_api_user_image_gen")
+
+    const body = (await response.json()) as {
+      output: Array<{ namespace?: string }>
+    }
+    expect(body.output[0].namespace).toBe("image_gen")
+  })
+
   test("uses Codex subagent headers for Responses request attribution", async () => {
     createResponses.mockImplementation((payload) =>
       Promise.resolve(createResponsesResult(payload.model)),
