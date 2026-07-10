@@ -85,8 +85,9 @@ export const translateChatPayloadToResponses = (
   if (systemTexts.length > 0) {
     payload.instructions = systemTexts.join("\n\n")
   }
-  if (chat.max_tokens != null) {
-    payload.max_output_tokens = chat.max_tokens
+  const maxOutputTokens = chat.max_tokens ?? chat.max_completion_tokens
+  if (maxOutputTokens != null) {
+    payload.max_output_tokens = maxOutputTokens
   }
   if (chat.temperature != null) payload.temperature = chat.temperature
   if (chat.top_p != null) payload.top_p = chat.top_p
