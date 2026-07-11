@@ -58,6 +58,10 @@ export const getResponsesTransportForModel = (
   const useWebSocket =
     responsesUtilsDependencies.isResponsesApiWebSocketEnabled()
 
+  if (supportedEndpoints.includes(RESPONSES_ENDPOINT)) {
+    return "http"
+  }
+
   if (
     selectedModel?.id
     && RESPONSES_WEBSOCKET_DISABLED_MODELS.has(selectedModel.id)
@@ -72,10 +76,6 @@ export const getResponsesTransportForModel = (
     && supportedEndpoints.includes(RESPONSES_WS_ENDPOINT)
   ) {
     return "websocket"
-  }
-
-  if (supportedEndpoints.includes(RESPONSES_ENDPOINT)) {
-    return "http"
   }
 
   return null
