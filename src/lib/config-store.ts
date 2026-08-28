@@ -142,7 +142,7 @@ export const defaultConfig: AppConfig = {
   extraPrompts: {
     "gpt-5-mini": gpt5ExplorationPrompt,
   },
-  smallModel: "gpt-5-mini",
+  smallModel: "gpt-5.6-luna",
   contextManagement: defaultContextManagement,
   modelResponsesApiCompactThresholds,
   modelReasoningEfforts: {

@@ -52,7 +52,7 @@ From here, jump to the guide for your client: [Claude Code](#using-with-claude-c
 - **Unified API Gateway**: Serve OpenAI-compatible Chat Completions (`/v1/chat/completions`), the OpenAI Responses API (`/v1/responses`), and Anthropic-compatible Messages (`/v1/messages`) from one local endpoint.
 - **Multi-Provider**: Route GitHub Copilot, the built-in `codex` provider, and third-party providers (Kimi, DeepSeek, DashScope, OpenRouter, OpenCode Go, or a custom provider) behind the same gateway. GitHub Copilot is optional — with at least one enabled provider, the server starts in provider-only mode without a GitHub token.
 - **Coding Agent Ready**: First-class setups for Claude Code, OpenCode, and Codex, including the interactive `--claude-code` launcher and a merged model catalog for Codex.
-- **Streaming & WebSocket**: SSE streaming on all three client-facing protocols. Upstream Copilot Responses traffic selects WebSocket or HTTP from each model's advertised endpoints; streamed Responses traffic for the built-in `codex` provider uses WebSocket by default and uses HTTP when `useResponsesApiWebSocket` is disabled.
+- **Streaming & WebSocket**: SSE streaming on all three client-facing protocols. Upstream Copilot Responses traffic prefers HTTP when a model advertises `/responses` and uses WebSocket only for WebSocket-only models when enabled; streamed Responses traffic for the built-in `codex` provider uses WebSocket by default and uses HTTP when `useResponsesApiWebSocket` is disabled.
 - **Desktop App**: Electron GUI with GitHub Copilot sign-in, Codex OAuth, provider configuration, token usage, logs, and one-click start/stop.
 
 ## Compatibility
@@ -670,7 +670,7 @@ Gateway API keys live under `auth.apiKeys` in `config.json`. Manage them with `c
     "extraPrompts": {
       "gpt-5-mini": "<built-in exploration prompt>"
     },
-    "smallModel": "gpt-5-mini",
+    "smallModel": "gpt-5.6-luna",
     "contextManagement": {
       "messages": true,
       "responses": false
@@ -723,7 +723,8 @@ Gateway API keys live under `auth.apiKeys` in `config.json`. Manage them with `c
     - `inputModalities` (optional): Supported Codex input types. Use `["text", "image"]` for a model that accepts both text and images. Missing configured values use upstream metadata before the built-in non-GPT model catalog. GPT models do not receive these built-in capability defaults and continue to use the native Codex catalog or upstream metadata.
     - `reasoningEfforts` (optional): Reasoning levels advertised for Codex. Missing configured and upstream values use the built-in non-GPT model catalog before falling back to `["high", "xhigh", "max", "ultra"]`. Provider Responses requests with an unsupported effort are normalized to a supported level when these capabilities are known.
     - `defaultReasoningEffort` (optional): Default Codex reasoning level. Built-in model metadata may provide a known default; otherwise it defaults to `max` when available, then the first configured level. Synthetic Codex models always enable parallel tool calls.
-- **smallModel:** Fallback model used for tool-less warmup messages (e.g., Claude Code probe requests); defaults to gpt-5-mini. The gateway forces this small model on no-tool warmup or probe requests to avoid consuming premium requests. This behavior only applies to non-token-based-billing GitHub Copilot accounts (`token_based_billing` is false); for token-based-billing accounts the warmup small-model fallback is skipped since there is no premium-request quota to preserve.
+- **smallModel:** Fallback model used for tool-less warmup messages (e.g., Claude Code probe requests) and connection-reset input compaction; defaults to gpt-5.6-luna. The gateway forces this small model on no-tool warmup or probe requests to avoid consuming premium requests. This behavior only applies to non-token-based-billing GitHub Copilot accounts (`token_based_billing` is false); for token-based-billing accounts the warmup small-model fallback is skipped since there is no premium-request quota to preserve.
+- **Input image history:** When the latest user message contains images, the gateway keeps every image in that message and replaces all earlier input images with a static redacted placeholder. A text-only latest user message leaves image history unchanged.
 - **contextManagement:** Controls whether the proxy adds Responses API `context_management` compaction instructions. `messages` applies when Anthropic-style `/v1/messages` requests are translated to Responses API, including `openai-responses` provider message routes, and defaults to `true`. `responses` applies to native `/v1/responses` traffic, including `provider/model` aliases and the built-in `codex` provider, and defaults to `false`. Enable `responses` only after checking that your client supports context management compaction. When enabled, the request includes `context_management` in the body and keeps only the latest compaction carrier on follow-up turns. The proxy only adds context management and compacts history for `gpt-*` models; both configuration switches have no effect on non-GPT models such as Grok. **Note:** Context management is also forcibly disabled for GPT-5.6 and above models (e.g. `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`) because enabling it breaks prompt cache hits on those models. These overrides take precedence over the `contextManagement` and `modelResponsesApiCompactThresholds` settings.
  - **modelResponsesApiCompactThresholds:** Per-model Responses API `compact_threshold` overrides used when the proxy adds `context_management`. These values take precedence over the fallback threshold from `resolveResponsesCompactThreshold` (`max_prompt_tokens * ratio`, or the default fallback). Defaults set `gpt-5.4` and `gpt-5.5` to `217600` (`272000 * 0.8`). Models not listed continue to use the normal fallback logic.
 - **modelReasoningEfforts:** Per-model fallback reasoning effort for `/v1/messages` requests. It is used only when the request does not provide `output_config.effort`.
@@ -731,7 +732,7 @@ Gateway API keys live under `auth.apiKeys` in `config.json`. Manage them with `c
   - **Forwarding:** the resolved value remains `output_config.effort` for the Copilot native Messages API and becomes `reasoning.effort` when translated to the Responses API.
   - **Configuration values:** `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`.
 - **useMessagesApi:** When `true`, models that advertise Copilot's native `/v1/messages` endpoint use the Messages API. If Messages is disabled or unavailable for the selected model, the gateway uses Responses when that model advertises a Responses endpoint, then falls back to Chat Completions when supported. Set this to `false` to skip native Messages routing. Defaults to `true`.
-- **useResponsesApiWebSocket:** When `true`, Copilot Responses requests use WebSocket for models that advertise `ws:/responses`; models that advertise only `/responses` use HTTP. Streamed Responses requests for the built-in `codex` provider use WebSocket whenever this setting is enabled, while non-streaming Codex requests always use HTTP. Set this to `false` to make Copilot use HTTP `/responses` where the selected model advertises it and to send streamed Codex Responses requests over HTTP. WebSocket failures are not retried automatically over HTTP. Defaults to `true`. If a proxy, VPN, or network blocks or destabilizes WebSocket traffic, disable this setting or switch networks.
+- **useResponsesApiWebSocket:** When `true`, Copilot Responses requests prefer HTTP for models that advertise `/responses` and use WebSocket only when `ws:/responses` is the sole Responses endpoint. Streamed Responses requests for the built-in `codex` provider use WebSocket whenever this setting is enabled, while non-streaming Codex requests always use HTTP. Set this to `false` to disable Copilot WebSocket transport and to send streamed Codex Responses requests over HTTP. WebSocket failures are not retried automatically over HTTP. Defaults to `true`. If a proxy, VPN, or network blocks or destabilizes WebSocket traffic, disable this setting or switch networks.
 - **responsesTransport:** Positive integer lifecycle and buffering limits for every upstream Responses transport. Invalid, zero, or negative values fall back to the defaults shown above. `headersTimeoutMsV2` covers connection setup through receipt of HTTP response headers; it is not a total generation deadline. `streamInactivityTimeoutMs` is reset by every HTTP body chunk or WebSocket message, allowing long generations to continue while they remain active. `websocketOpenTimeoutMs` limits the WebSocket handshake, while `websocketPoolIdleTimeoutMs` controls only completed, reusable pooled sockets. The byte and message limits bound queued WebSocket events; exceeding either limit fails that stream and invalidates its socket rather than dropping or reordering events.
 - **useResponsesApiWebSearch:** When `true`, the server keeps Responses API tools with `type: "web_search"` and forwards them upstream. Set to `false` to strip those tools from `/responses` payloads. Defaults to `true`.
 - **alphaSearchCodexPriority:** Defaults to `true`. Top-level alpha-search requests prefer the Codex alpha-search endpoint because it does not consume provider quota. If Codex is unavailable, or this setting is `false`, requests with a `provider/model` alias other than `codex/model` use that provider's `/v1/responses` endpoint, and requests without a provider prefix use GitHub Copilot Responses web search. The adapter recognizes every current Codex search command; unsupported `image_query` and `screenshot` operations return successful no-retry tool output.
@@ -779,7 +780,7 @@ These endpoints mimic the OpenAI API structure.
 | --------------------------- | ------ | ---------------------------------------------------------------- |
 | `POST /v1/responses`        | `POST` | OpenAI Most advanced interface for generating model responses. Supports `provider/model` aliases for `openai-responses` providers. |
 | `POST /v1/chat/completions` | `POST` | Creates a model response for the given chat conversation. Supports `provider/model` aliases for `openai-compatible` providers and can be used without Copilot when the target provider is configured. |
-| `GET /v1/models`            | `GET`  | Lists Copilot models plus enabled provider models using `provider/model-id` IDs. Requests from Codex clients (`User-Agent` beginning with `codex`) are forwarded to the Codex Models upstream. |
+| `GET /v1/models`            | `GET`  | Lists Copilot models plus enabled provider models using `provider/model-id` IDs, including for Codex clients configured with the top-level gateway URL. |
 | `POST /v1/embeddings`       | `POST` | Creates an embedding vector representing the input text.         |
 
 ### Codex Backend Endpoints
@@ -819,6 +820,14 @@ These endpoints are reserved for local administrative actions and only accept `a
 | ------------------------------------- | ------ | --------------------------------------------------------------------------- |
 | `GET /admin/config/model-mappings`    | `GET`  | Returns the current `config.json` path and the active `modelMappings` map.  |
 | `POST /admin/config/model-mappings`   | `POST` | Updates only the `modelMappings` field in `config.json` and returns it back. |
+
+### Error Diagnostics
+
+The server stores failed request diagnostics under
+`~/Downloads/copilot-api-errors/<startup-date>/`. Each failure gets its own
+directory containing the request, response, upstream response when available,
+headers, trace ID, and stack trace. Credentials are redacted. Set
+`COPILOT_API_ERROR_DIR` to override the root directory.
 
 ## Example Usage
 

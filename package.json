@@ -37,6 +37,8 @@
     "prepare": "simple-git-hooks",
     "release": "bumpp && bun publish --access public",
     "start": "NODE_USE_SYSTEM_CA=1 NODE_ENV=production bun run ./src/main.ts",
+    "start:latest": "git pull --rebase --autostash && bun install --frozen-lockfile && NODE_USE_SYSTEM_CA=1 NODE_ENV=production bun run ./src/main.ts start",
+    "sync:codex-models": "bun run ./src/scripts/sync-codex-model-catalog.ts",
     "typecheck": "tsc"
   },
   "simple-git-hooks": {

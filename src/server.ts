@@ -7,6 +7,7 @@ import {
   createAuthMiddleware,
   getConfiguredAdminApiKeys,
 } from "./lib/request-auth"
+import { errorArtifactMiddleware } from "./lib/error-artifacts"
 import { traceIdMiddleware } from "./lib/trace"
 import { zstdDecompressionMiddleware } from "./lib/zstd-request"
 import { alphaSearchRoutes } from "./routes/alpha-search/route"
@@ -28,6 +29,7 @@ import { usageRoute } from "./routes/usage/route"
 export const server = new Hono()
 
 server.use(traceIdMiddleware)
+server.use(errorArtifactMiddleware)
 server.use(logger())
 server.use(cors())
 server.use(

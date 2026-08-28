@@ -134,6 +134,7 @@ test("debugJsonTail preserves tail truncation behavior", () => {
 test("createHandlerLogger writes to COPILOT_API_LOG_DIR when set", async () => {
   const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "copilot-api-logs-"))
   process.env[LOG_DIR_ENV] = logDir
+  state.verbose = true
 
   try {
     const logger = createHandlerLogger("env-override-handler")
@@ -178,6 +179,7 @@ test("createHandlerLogger writes to COPILOT_API_LOG_DIR when set", async () => {
 test("createHandlerLogger closes the previous stream when the date changes", async () => {
   const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "copilot-api-logs-"))
   process.env[LOG_DIR_ENV] = logDir
+  state.verbose = true
   const trackedStreams = trackLogStreams()
 
   try {
@@ -227,6 +229,7 @@ test("createHandlerLogger closes the previous stream when the date changes", asy
 test("logger startup removes expired files", async () => {
   const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "copilot-api-logs-"))
   process.env[LOG_DIR_ENV] = logDir
+  state.verbose = true
   const filePath = path.join(logDir, "retention-handler-2026-01-01.log")
   const firstDate = localDate(2026, 1, 1)
   fs.writeFileSync(filePath, "expired\n", "utf8")
@@ -264,6 +267,7 @@ test("logger startup removes expired files", async () => {
 test("logger maintenance warns when an expired log cannot be removed", async () => {
   const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "copilot-api-logs-"))
   process.env[LOG_DIR_ENV] = logDir
+  state.verbose = true
   const filePath = path.join(logDir, "blocked-handler-2026-01-01.log")
   const firstDate = localDate(2026, 1, 1)
   fs.writeFileSync(filePath, "blocked\n", "utf8")
@@ -317,4 +321,34 @@ test("logger maintenance warns when an expired log cannot be removed", async () 
       retryDelay: 100,
     })
   }
+})
+
+test("handler logger does not write files unless verbose logging is enabled", () => {
+  const appDir = fs.mkdtempSync(path.join(os.tmpdir(), "copilot-api-logger-"))
+
+  try {
+    const script = `
+process.env.COPILOT_API_HOME = ${JSON.stringify(appDir)}
+const { state } = await import("./src/lib/state")
+const { createHandlerLogger } = await import("./src/lib/logger")
+state.verbose = false
+createHandlerLogger("responses-handler").info("request")
+`
+    const result = Bun.spawnSync(["bun", "--eval", script], {
+      cwd: process.cwd(),
+    })
+
+    expect(result.exitCode).toBe(0)
+    expect(fs.existsSync(path.join(appDir, "logs"))).toBe(false)
+  } finally {
+    fs.rmSync(appDir, { force: true, recursive: true })
+  }
+})
+
+test("start:latest does not force verbose logging", async () => {
+  const packageJson = (await Bun.file("package.json").json()) as {
+    scripts: Record<string, string>
+  }
+
+  expect(packageJson.scripts["start:latest"]).not.toContain("--verbose")
 })

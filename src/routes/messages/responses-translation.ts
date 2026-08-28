@@ -1079,7 +1079,7 @@ const parseToolSearchArguments = (
 }
 
 const fallbackContentBlocks = (
-  outputText: string,
+  outputText: string | null,
 ): Array<AnthropicAssistantContentBlock> => {
   if (!outputText) {
     return []

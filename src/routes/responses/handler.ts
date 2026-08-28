@@ -3,9 +3,11 @@ import type { Context } from "hono"
 import { streamSSE } from "hono/streaming"
 
 import {
+  getSmallModel,
   isResponsesApiWebSearchEnabled as isConfiguredResponsesApiWebSearchEnabled,
   resolveMappedModel,
 } from "~/lib/config"
+import { recordDiagnosticRequestBody } from "~/lib/error-artifacts"
 import { createHandlerLogger, debugJson, debugJsonTail } from "~/lib/logger"
 import { findEndpointModel } from "~/lib/models"
 import { resolveConfiguredProviderModelAlias } from "~/lib/provider-resolver"
@@ -35,6 +37,10 @@ import type {
 import { createResponses as createCopilotResponses } from "~/services/copilot/create-responses"
 
 import { handleResponsesViaMessages } from "./messages-handler"
+import {
+  compactResponsesPayloadAfterConnectionReset,
+  shouldRecoverConnectionReset,
+} from "./connection-reset-compaction"
 import { createStreamIdTracker, fixStreamIds } from "./stream-id-sync"
 import {
   applyResponsesApiContextManagement,
@@ -43,7 +49,7 @@ import {
   getResponsesRequestOptions,
   normalizeInputImageDetails,
   normalizeResponsesReasoningEffort,
-  sanitizeOversizedInputImages,
+  replaceHistoricalInputImagesWithPlaceholders,
   sanitizeUnsupportedInputFields,
 } from "./utils"
 import consola from "consola"
@@ -53,12 +59,14 @@ const logger = createHandlerLogger("responses-handler")
 export const responsesHandlerDependencies = {
   createResponses: createCopilotResponses,
   findEndpointModel,
+  getSmallModel,
   isResponsesApiWebSearchEnabled: isConfiguredResponsesApiWebSearchEnabled,
   resolveMappedModel,
 }
 
 export const handleResponses = async (c: Context) => {
   const payload = await c.req.json<ResponsesPayload>()
+  recordDiagnosticRequestBody(payload)
   const requestedModel = payload.model
   payload.model = responsesHandlerDependencies.resolveMappedModel(payload.model)
   if (payload.model !== requestedModel) {
@@ -111,7 +119,7 @@ export const handleResponses = async (c: Context) => {
     )
   }
   const responsesTransport = getResponsesTransportForModel(selectedModel)
-
+  replaceHistoricalInputImagesWithPlaceholders(payload)
   const useMessagesFallback = shouldFallbackToMessages(
     c,
     payload.model,
@@ -162,21 +170,12 @@ export const handleResponses = async (c: Context) => {
     )
   }
 
+  aliasReservedNamespacesForUpstream(payload)
   removeUnsupportedTools(payload)
   fillEmptyNamespaceToolDescriptions(payload)
 
   if (!responsesHandlerDependencies.isResponsesApiWebSearchEnabled()) {
     removeWebSearchTool(payload)
-  }
-
-  const sanitizedImageCount = sanitizeOversizedInputImages(
-    payload,
-    selectedModel?.capabilities.limits.vision?.max_prompt_image_size,
-  )
-  if (sanitizedImageCount > 0) {
-    logger.warn(
-      `Omitted ${sanitizedImageCount} oversized input image(s) before forwarding to Copilot Responses`,
-    )
   }
 
   // Smaller than the client compaction threshold, use server-side compaction to maintain cache hit rate
@@ -199,7 +198,7 @@ export const handleResponses = async (c: Context) => {
     getResponsesRequestOptions(payload)
   const initiator = subagentMarker ? "agent" : inferredInitiator
 
-  const response = await responsesHandlerDependencies.createResponses(payload, {
+  const requestOptions = {
     vision,
     initiator,
     subagentMarker,
@@ -207,7 +206,86 @@ export const handleResponses = async (c: Context) => {
     sessionId: fallbackSessionId,
     signal: c.req.raw.signal,
     transport: responsesTransport,
-  })
+  } as const
+  let response
+  try {
+    response = await responsesHandlerDependencies.createResponses(
+      payload,
+      requestOptions,
+    )
+  } catch (error) {
+    if (
+      c.req.raw.signal.aborted
+      || !shouldRecoverConnectionReset(error, payload)
+    ) {
+      throw error
+    }
+
+    const configuredSmallModel = responsesHandlerDependencies.getSmallModel()
+    const summaryModel =
+      responsesHandlerDependencies.resolveMappedModel(configuredSmallModel)
+    const selectedSummaryModel =
+      responsesHandlerDependencies.findEndpointModel(summaryModel)
+    if (!selectedSummaryModel?.supported_endpoints?.includes("/responses")) {
+      throw error
+    }
+
+    const resolvedSummaryModel = selectedSummaryModel.id
+    const recordSummaryUsage = createCopilotTokenUsageRecorder({
+      endpoint: "responses",
+      fallbackSessionId,
+      model: resolvedSummaryModel,
+    })
+    logger.warn("Recovering upstream connection reset with input compaction", {
+      model: payload.model,
+      summaryModel: resolvedSummaryModel,
+    })
+
+    const compacted = await compactResponsesPayloadAfterConnectionReset(
+      payload,
+      {
+        smallModel: resolvedSummaryModel,
+        summarize: async (summaryPayload) => {
+          const summaryResponse =
+            await responsesHandlerDependencies.createResponses(summaryPayload, {
+              vision: false,
+              initiator: "agent",
+              requestId: generateRequestIdFromPayload(
+                { messages: summaryPayload.input },
+                fallbackSessionId,
+              ),
+              sessionId: fallbackSessionId,
+              signal: c.req.raw.signal,
+              transport: "http",
+            })
+          if (isAsyncIterable(summaryResponse)) {
+            throw new Error("Responses compaction summary returned a stream")
+          }
+          recordSummaryUsage({
+            ...normalizeResponsesUsage(summaryResponse.usage),
+            total_nano_aiu: normalizeOptionalToken(
+              summaryResponse.copilot_usage?.total_nano_aiu,
+            ),
+          })
+          return summaryResponse
+        },
+      },
+    )
+    if (!compacted) {
+      throw error
+    }
+
+    logger.warn("Compacted Responses input; retrying request", {
+      chunkCount: compacted.chunkCount,
+      compactedBytes: compacted.payloadBytes,
+      originalBytes: compacted.originalBytes,
+      summaryModel: resolvedSummaryModel,
+    })
+    response = await responsesHandlerDependencies.createResponses(
+      compacted.payload,
+      requestOptions,
+    )
+  }
 
   if (isStreamingRequested(payload) && isAsyncIterable(response)) {
     logger.debug("Forwarding native Responses stream")
@@ -215,30 +293,42 @@ export const handleResponses = async (c: Context) => {
       const idTracker = createStreamIdTracker()
       let usage: UsageTokens = {}
       const iterator = response[Symbol.asyncIterator]()
+      let chunkCount = 0
+      let downstreamWriteCount = 0
+      let terminalEvent: string | undefined
+      let lastEventType: string | undefined
 
       try {
         for await (const chunk of {
           [Symbol.asyncIterator]: () => iterator,
         }) {
+          chunkCount += 1
           debugJson(logger, "Responses stream chunk:", chunk)
           const parsedEvent = parseResponsesStreamEvent(chunk)
+          lastEventType =
+            parsedEvent?.type ?? (chunk as { event?: string }).event
           if (
             parsedEvent?.type === "response.completed"
             || parsedEvent?.type === "response.failed"
             || parsedEvent?.type === "response.incomplete"
           ) {
+            terminalEvent = parsedEvent.type
             usage = {
               ...normalizeResponsesUsage(parsedEvent.response.usage),
               total_nano_aiu: normalizeOptionalToken(
                 parsedEvent.copilot_usage?.total_nano_aiu,
               ),
             }
+          } else if (parsedEvent?.type === "error") {
+            terminalEvent = parsedEvent.type
           }
 
-          const processedData = fixStreamIds(
-            (chunk as { data?: string }).data ?? "",
-            (chunk as { event?: string }).event,
-            idTracker,
+          const processedData = restoreReservedNamespacesInJson(
+            fixStreamIds(
+              (chunk as { data?: string }).data ?? "",
+              (chunk as { event?: string }).event,
+              idTracker,
+            ),
           )
 
           await stream.writeSSE({
@@ -246,7 +336,34 @@ export const handleResponses = async (c: Context) => {
             event: (chunk as { event?: string }).event,
             data: processedData,
           })
+          downstreamWriteCount += 1
         }
+
+        const streamSummary = {
+          chunkCount,
+          downstreamWriteCount,
+          lastEventType,
+          requestId,
+          terminalEvent,
+        }
+        if (terminalEvent) {
+          logger.info("Responses downstream stream completed", streamSummary)
+        } else {
+          logger.warn(
+            "Responses downstream stream ended before terminal event",
+            streamSummary,
+          )
+        }
+      } catch (error) {
+        logger.error("Responses downstream stream failed", {
+          chunkCount,
+          downstreamWriteCount,
+          error: getErrorMessage(error),
+          lastEventType,
+          requestId,
+          terminalEvent,
+        })
+        throw error
       } finally {
         await iterator.return?.()
         recordUsage(usage)
@@ -259,6 +376,7 @@ export const handleResponses = async (c: Context) => {
     tailLength: 400,
   })
   const result = response as ResponsesResult
+  restoreReservedNamespacesForClient(result)
   recordUsage({
     ...normalizeResponsesUsage(result.usage),
     total_nano_aiu: normalizeOptionalToken(
@@ -307,6 +425,14 @@ const parseResponsesStreamEvent = (
   }
 }
 
+const getErrorMessage = (error: unknown): string => {
+  if (error instanceof Error && error.message) {
+    return error.message
+  }
+
+  return String(error)
+}
+
 const removeWebSearchTool = (payload: ResponsesPayload): void => {
   if (!Array.isArray(payload.tools) || payload.tools.length === 0) return
 
@@ -317,6 +443,13 @@ const removeWebSearchTool = (payload: ResponsesPayload): void => {
 
 const COPILOT_UNSUPPORTED_TOOL_TYPES = new Set(["image_generation"])
 const COPILOT_UNSUPPORTED_TOOL_NAMESPACES = new Set(["image_gen"])
+
+const RESERVED_NAMESPACE_ALIASES = new Map([
+  ["image_gen", "copilot_api_user_image_gen"],
+])
+const RESERVED_NAMESPACE_REVERSE_ALIASES = new Map(
+  [...RESERVED_NAMESPACE_ALIASES].map(([from, to]) => [to, from]),
+)
 
 export const removeUnsupportedTools = (payload: ResponsesPayload): void => {
   if (!Array.isArray(payload.tools) || payload.tools.length === 0) return
@@ -369,6 +502,61 @@ const fillEmptyNamespaceDescriptions = (tools: unknown): void => {
     }
   }
 }
+
+const aliasReservedNamespacesForUpstream = (
+  payload: ResponsesPayload,
+): void => {
+  rewriteReservedNamespaces(payload, RESERVED_NAMESPACE_ALIASES)
+}
+
+const restoreReservedNamespacesForClient = (value: unknown): void => {
+  rewriteReservedNamespaces(value, RESERVED_NAMESPACE_REVERSE_ALIASES)
+}
+
+const restoreReservedNamespacesInJson = (data: string): string => {
+  if (!data || data === "[DONE]") {
+    return data
+  }
+
+  try {
+    const parsed = JSON.parse(data) as unknown
+    restoreReservedNamespacesForClient(parsed)
+    return JSON.stringify(parsed)
+  } catch {
+    return data
+  }
+}
+
+const rewriteReservedNamespaces = (
+  value: unknown,
+  aliases: ReadonlyMap<string, string>,
+): void => {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      rewriteReservedNamespaces(item, aliases)
+    }
+    return
+  }
+
+  if (!isRecord(value)) {
+    return
+  }
+
+  if (value.type === "namespace" && typeof value.name === "string") {
+    value.name = aliases.get(value.name) ?? value.name
+  }
+
+  if (value.type === "function_call" && typeof value.namespace === "string") {
+    value.namespace = aliases.get(value.namespace) ?? value.namespace
+  }
+
+  for (const item of Object.values(value)) {
+    rewriteReservedNamespaces(item, aliases)
+  }
+}
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null
 
 const getIncomingResponsesSessionId = (c: Context): string | undefined =>
   getTrimmedHeader(c, "session-id") ?? getTrimmedHeader(c, "x-session-id")

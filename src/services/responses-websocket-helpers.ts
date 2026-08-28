@@ -1,4 +1,5 @@
 import type { ResponseErrorEvent } from "~/lib/types/responses"
+import { getUpstreamConnectionClosedError } from "~/lib/error"
 
 export interface ResponsesStreamErrorChunk {
   data?: string
@@ -18,9 +19,10 @@ export const getErrorMessage = (error: unknown): string => {
 
 export const createResponsesErrorServerSentEventChunk = (
   message: string,
+  code: string | null = null,
 ): ResponsesStreamErrorChunk => {
   const errorEvent: ResponseErrorEvent = {
-    code: null,
+    code,
     message,
     param: null,
     sequence_number: 0,
@@ -65,11 +67,13 @@ export const createResponsesSafeStream = async function* <
     if (options.signal?.aborted || isAbortError(error)) {
       return
     }
+    const connectionError = getUpstreamConnectionClosedError(error)
     // The cast relies on TChunk staying shape-compatible with the error chunk
     // ({ data, event } only, no required extra fields). Keep new call sites
     // within that constraint.
     yield createResponsesErrorServerSentEventChunk(
-      getErrorMessage(error),
+      connectionError?.message ?? getErrorMessage(error),
+      connectionError?.code,
     ) as TChunk
   }
 }

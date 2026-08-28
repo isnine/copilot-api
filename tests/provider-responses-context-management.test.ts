@@ -118,6 +118,38 @@ beforeEach(async () => {
     fetchMock as unknown as typeof fetch
 })
 
+test("keeps all images in the latest provider Responses user message", async () => {
+  const firstImageUrl = "data:image/png;base64,QUFB"
+  const secondImageUrl = "data:image/png;base64,QkJC"
+
+  const response = await createApp().request("/openai/v1/responses", {
+    body: JSON.stringify({
+      input: [
+        {
+          content: [
+            { image_url: firstImageUrl, type: "input_image" },
+            { image_url: secondImageUrl, type: "input_image" },
+          ],
+          role: "user",
+        },
+      ],
+      model: "gpt-test",
+    }),
+    headers: { "content-type": "application/json" },
+    method: "POST",
+  })
+
+  expect(response.status).toBe(200)
+  const [, init] = fetchMock.mock.calls[0]
+  const body = parseJsonRequestBody((init as RequestInit).body) as {
+    input: Array<{ content: Array<Record<string, unknown>> }>
+  }
+  expect(body.input[0]?.content).toEqual([
+    { image_url: firstImageUrl, type: "input_image" },
+    { image_url: secondImageUrl, type: "input_image" },
+  ])
+})
+
 afterEach(async () => {
   ;(globalThis as unknown as { fetch: typeof fetch }).fetch = originalFetch
   providerConfig = null

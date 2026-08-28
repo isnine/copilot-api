@@ -5,7 +5,6 @@ import { streamSSE } from "hono/streaming"
 
 import type { CompactType } from "~/lib/compact"
 import type { SubagentMarker } from "~/lib/subagent"
-import type { Model } from "~/lib/types/models"
 
 import {
   getMessageApiWebSearchModel,
@@ -56,6 +55,7 @@ import { translateAnthropicMessagesToResponsesPayload } from "../responses-trans
 import {
   getResponsesRequestOptions,
   getResponsesTransportForModel,
+  replaceHistoricalInputImagesWithPlaceholders,
 } from "../../responses/utils"
 import {
   buildResponsesWebSearchTool,
@@ -388,10 +388,11 @@ export const handleWebSearchViaResponses = async (
     subagentAgentId: options.subagentMarker?.agent_id,
   })
 
-  const selectedModel: Model | undefined = findEndpointModel(webSearchModel)
+  replaceHistoricalInputImagesWithPlaceholders(responsesPayload)
+
   const { vision, initiator } = getResponsesRequestOptions(responsesPayload)
   const transport =
-    getResponsesTransportForModel(selectedModel, {
+    getResponsesTransportForModel(findEndpointModel(webSearchModel), {
       compactType: options.compactType,
     }) ?? "http"
 

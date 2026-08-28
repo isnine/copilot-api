@@ -1,6 +1,7 @@
 import { Hono } from "hono"
 
 import { forwardError } from "~/lib/error"
+import { recordDiagnosticRequestBody } from "~/lib/error-artifacts"
 import { createCopilotTokenUsageRecorder } from "~/lib/token-usage"
 import {
   createEmbeddings,
@@ -12,6 +13,7 @@ export const embeddingRoutes = new Hono()
 embeddingRoutes.post("/", async (c) => {
   try {
     const paylod = await c.req.json<EmbeddingRequest>()
+    recordDiagnosticRequestBody(paylod)
     const response = await createEmbeddings(paylod)
     const recordUsage = createCopilotTokenUsageRecorder({
       endpoint: "embeddings",

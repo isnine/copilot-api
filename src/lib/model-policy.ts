@@ -127,7 +127,7 @@ export function resolveMappedModel(model: string): string {
 
 export function getSmallModel(): string {
   const config = getConfig()
-  return config.smallModel ?? "gpt-5-mini"
+  return config.smallModel ?? "gpt-5.6-luna"
 }
 
 export function isContextManagementEnabledForMessages(): boolean {

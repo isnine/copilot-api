@@ -10,6 +10,7 @@ import {
   resolveMappedModel,
 } from "~/lib/config"
 import { createHandlerLogger, debugJson } from "~/lib/logger"
+import { recordDiagnosticRequestBody } from "~/lib/error-artifacts"
 import { findEndpointModel } from "~/lib/models"
 import { resolveConfiguredProviderModelAlias } from "~/lib/provider-resolver"
 import { state } from "~/lib/state"
@@ -56,6 +57,7 @@ export const messagesFlowHandlers = {
 
 export async function handleCompletion(c: Context) {
   const anthropicPayload = await c.req.json<AnthropicMessagesPayload>()
+  recordDiagnosticRequestBody(anthropicPayload)
 
   return await handleCompletionPayload(c, anthropicPayload)
 }

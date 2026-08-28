@@ -34,6 +34,7 @@ import {
   isDashScopeAliyunProvider,
 } from "~/lib/dashscope"
 import { HTTPError } from "~/lib/error"
+import { recordDiagnosticRequestBody } from "~/lib/error-artifacts"
 import { createHandlerLogger, debugJson, debugLazy } from "~/lib/logger"
 import { resolveProviderConfig } from "~/lib/provider-resolver"
 import { resolveBridgeToolSearchName } from "~/lib/tool-search"
@@ -81,6 +82,7 @@ import {
 import {
   applyResponsesApiContextManagement,
   compactInputByLatestCompaction,
+  replaceHistoricalInputImagesWithPlaceholders,
 } from "~/routes/responses/utils"
 import { getModels as getCodexModels } from "~/services/codex/get-models"
 import { forwardCodexResponses } from "~/services/codex/create-responses"
@@ -109,6 +111,7 @@ export async function handleProviderMessages(
 ): Promise<Response> {
   const provider = c.req.param("provider")
   const payload = await c.req.json<AnthropicMessagesPayload>()
+  recordDiagnosticRequestBody(payload)
 
   const claudeAutoModel = getClaudeAutoModel()
   if (claudeAutoModel && isClaudeAutoModelRequest(payload)) {
@@ -280,6 +283,7 @@ const handleOpenAIResponsesProviderWebSearchMessages = async (
       `Normalized reasoning effort from ${normalizedReasoningEffort.from} to ${normalizedReasoningEffort.to} based on the provider model configuration`,
     )
   }
+  replaceHistoricalInputImagesWithPlaceholders(responsesPayload)
 
   debugJson(logger, "provider.messages.responses.web_search.request", {
     payload: responsesPayload,
@@ -398,6 +402,7 @@ const handleOpenAIResponsesProviderMessages = async (
       `Normalized reasoning effort from ${normalizedMessagesReasoningEffort.from} to ${normalizedMessagesReasoningEffort.to} based on the provider model configuration`,
     )
   }
+  replaceHistoricalInputImagesWithPlaceholders(responsesPayload)
 
   if (providerConfig.name === "codex" && !wantsStream) {
     responsesPayload.stream = true

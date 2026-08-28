@@ -7,13 +7,18 @@ import { serve, type ServerHandler } from "srvx"
 import invariant from "tiny-invariant"
 
 import { runProviderSetup } from "./auth"
+import { syncCodexModelCatalogFromEndpoint } from "./lib/codex-model-catalog"
 import { listEnabledProviders, mergeConfigWithDefaults } from "./lib/config"
 import { readGitHubToken } from "./lib/credential-store"
+import { initializeErrorArtifactRuntime } from "./lib/error-artifacts"
 import { getLatestModelForFamily } from "./lib/models"
 import { initOpencodeVersion } from "./lib/opencode"
 import { ensurePaths } from "./lib/paths"
 import { initProxyFromEnv } from "./lib/proxy"
-import { getMissingApiKeysMessage } from "./lib/request-auth"
+import {
+  getConfiguredApiKeys,
+  getMissingApiKeysMessage,
+} from "./lib/request-auth"
 import { generateEnvScript } from "./lib/shell"
 import { state } from "./lib/state"
 import { logUser, setupCopilotToken } from "./lib/token"
@@ -149,6 +154,17 @@ async function setupProviderMode(
   consola.info(`Configured providers: ${providersAfterSetup.join(", ")}`)
 }
 
+async function syncCodexModelCatalog(serverUrl: string): Promise<void> {
+  try {
+    await syncCodexModelCatalogFromEndpoint({
+      endpointUrl: `${serverUrl}/v1/models`,
+      apiKey: getConfiguredApiKeys()[0],
+    })
+  } catch (error) {
+    consola.warn("Codex model catalog sync failed.", error)
+  }
+}
+
 export async function runServer(options: RunServerOptions): Promise<void> {
   const tlsModule = await import("./lib/tls")
   tlsModule.enableSystemCACompat()
@@ -177,6 +193,12 @@ export async function runServer(options: RunServerOptions): Promise<void> {
   state.showToken = options.showToken
 
   await ensurePaths()
+  try {
+    const errorArtifactDirectory = await initializeErrorArtifactRuntime()
+    consola.info(`Error diagnostics directory: ${errorArtifactDirectory}`)
+  } catch (error) {
+    consola.warn("Error diagnostics directory is unavailable", error)
+  }
 
   const serverUrl = `http://localhost:${options.port}`
 
@@ -205,6 +227,8 @@ export async function runServer(options: RunServerOptions): Promise<void> {
       idleTimeout: 0,
     },
   })
+
+  void syncCodexModelCatalog(serverUrl)
 }
 
 export const start = defineCommand({

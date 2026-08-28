@@ -34,6 +34,7 @@ import {
   compactInputByLatestCompaction,
   getResponsesTransportForModel,
   getResponsesRequestOptions,
+  replaceHistoricalInputImagesWithPlaceholders,
 } from "~/routes/responses/utils"
 import type {
   ChatCompletionChunk,
@@ -250,14 +251,16 @@ export const handleWithResponsesApi = async (
   if (shouldCompactInput) {
     compactInputByLatestCompaction(responsesPayload)
   }
-
-  debugJson(logger, "Translated Responses payload:", responsesPayload)
+  replaceHistoricalInputImagesWithPlaceholders(responsesPayload)
 
   const { vision, initiator } = getResponsesRequestOptions(responsesPayload)
   const transport =
     getResponsesTransportForModel(selectedModel, {
       compactType: requestOptions.compactType,
     }) ?? "http"
+
+  debugJson(logger, "Translated Responses payload:", responsesPayload)
+
   const response = await messagesApiFlowDependencies.createResponses(
     responsesPayload,
     {
@@ -276,54 +279,97 @@ export const handleWithResponsesApi = async (
         toolSearchName: resolveBridgeToolSearchName(anthropicPayload.tools),
       })
       let usage: UsageTokens = {}
+      let upstreamChunkCount = 0
+      let translatedEventCount = 0
+      let terminalResponsesEvent: string | undefined
+      let lastResponsesEvent: string | undefined
+      let lastAnthropicEvent: string | undefined
 
-      for await (const chunk of response) {
-        const eventName = chunk.event
-        if (eventName === "ping") {
-          await stream.writeSSE({ event: "ping", data: '{"type":"ping"}' })
-          continue
-        }
+      try {
+        for await (const chunk of response) {
+          upstreamChunkCount += 1
+          const eventName = chunk.event
+          if (eventName === "ping") {
+            await stream.writeSSE({ event: "ping", data: '{"type":"ping"}' })
+            translatedEventCount += 1
+            lastAnthropicEvent = "ping"
+            continue
+          }
 
-        const data = chunk.data
-        if (!data) {
-          continue
-        }
+          const data = chunk.data
+          if (!data) {
+            continue
+          }
 
-        debugLazy(logger, () => ["Responses raw stream event:", data])
+          debugLazy(logger, () => ["Responses raw stream event:", data])
 
-        const responseEvent = JSON.parse(data) as ResponseStreamEvent
-        if (
-          responseEvent.type === "response.completed"
-          || responseEvent.type === "response.failed"
-          || responseEvent.type === "response.incomplete"
-        ) {
-          usage = {
-            ...normalizeResponsesUsage(responseEvent.response.usage),
-            total_nano_aiu: normalizeOptionalToken(
-              responseEvent.copilot_usage?.total_nano_aiu,
-            ),
+          const responseEvent = JSON.parse(data) as ResponseStreamEvent
+          lastResponsesEvent = responseEvent.type
+          if (
+            responseEvent.type === "response.completed"
+            || responseEvent.type === "response.failed"
+            || responseEvent.type === "response.incomplete"
+          ) {
+            terminalResponsesEvent = responseEvent.type
+            usage = {
+              ...normalizeResponsesUsage(responseEvent.response.usage),
+              total_nano_aiu: normalizeOptionalToken(
+                responseEvent.copilot_usage?.total_nano_aiu,
+              ),
+            }
+          } else if (responseEvent.type === "error") {
+            terminalResponsesEvent = responseEvent.type
+          }
+
+          const events = translateResponsesStreamEvent(
+            responseEvent,
+            streamState,
+          )
+          for (const event of events) {
+            const eventData = JSON.stringify(event)
+            debugLazy(logger, () => ["Translated Anthropic event:", eventData])
+            await stream.writeSSE({
+              event: event.type,
+              data: eventData,
+            })
+            translatedEventCount += 1
+            lastAnthropicEvent = event.type
+          }
+
+          if (streamState.messageCompleted) {
+            logger.info("Messages Responses bridge completed", {
+              lastAnthropicEvent,
+              lastResponsesEvent,
+              terminalResponsesEvent,
+              translatedEventCount,
+              upstreamChunkCount,
+            })
+            break
           }
         }
-
-        const events = translateResponsesStreamEvent(responseEvent, streamState)
-        for (const event of events) {
-          const eventData = JSON.stringify(event)
-          debugLazy(logger, () => ["Translated Anthropic event:", eventData])
-          await stream.writeSSE({
-            event: event.type,
-            data: eventData,
-          })
-        }
-
-        if (streamState.messageCompleted) {
-          logger.debug("Message completed, ending stream")
-          break
-        }
+      } catch (error) {
+        logger.error("Messages Responses bridge stream failed", {
+          error: getErrorMessage(error),
+          lastAnthropicEvent,
+          lastResponsesEvent,
+          messageCompleted: streamState.messageCompleted,
+          terminalResponsesEvent,
+          translatedEventCount,
+          upstreamChunkCount,
+        })
+        throw error
       }
 
       if (!streamState.messageCompleted) {
         logger.warn(
           "Responses stream ended without completion; sending error event",
+          {
+            lastAnthropicEvent,
+            lastResponsesEvent,
+            terminalResponsesEvent,
+            translatedEventCount,
+            upstreamChunkCount,
+          },
         )
         const errorEvent = buildErrorEvent(
           "Responses stream ended without completion, retry your request.",
@@ -331,6 +377,15 @@ export const handleWithResponsesApi = async (
         await stream.writeSSE({
           event: errorEvent.type,
           data: JSON.stringify(errorEvent),
+        })
+        translatedEventCount += 1
+        lastAnthropicEvent = errorEvent.type
+        logger.warn("Messages Responses bridge injected error event", {
+          lastAnthropicEvent,
+          lastResponsesEvent,
+          terminalResponsesEvent,
+          translatedEventCount,
+          upstreamChunkCount,
         })
       }
 
@@ -552,4 +607,12 @@ const parseAnthropicStreamEvent = (
   } catch {
     return null
   }
+}
+
+const getErrorMessage = (error: unknown): string => {
+  if (error instanceof Error && error.message) {
+    return error.message
+  }
+
+  return String(error)
 }

@@ -1,11 +1,27 @@
 import { AsyncLocalStorage } from "node:async_hooks"
 
+export interface RequestDiagnostics {
+  error?: {
+    message: string
+    name: string
+    stack?: string
+  }
+  requestBody?: unknown
+  upstreamResponse?: {
+    body: string
+    headers: Record<string, string>
+    status: number
+    statusText: string
+  }
+}
+
 export interface RequestContext {
   traceId: string
   startTime: number
   userAgent: string
   sessionAffinity: string | undefined
   parentSessionId: string | undefined
+  diagnostics?: RequestDiagnostics
 }
 
 const TRACE_ID_MAX_LENGTH = 64

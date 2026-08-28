@@ -14,6 +14,7 @@ export const traceIdMiddleware: MiddlewareHandler = async (c, next) => {
     sessionAffinity:
       c.req.header("x-session-affinity") ?? c.req.header("x-client-request-id"),
     parentSessionId: c.req.header("x-parent-session-id"),
+    diagnostics: {},
   }
 
   await requestContext.run(context, async () => {

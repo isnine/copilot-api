@@ -469,6 +469,8 @@ describe("responses handler token usage", () => {
   })
 
   test("routes non-gpt models with native Responses support through the Messages adapter for Codex clients", async () => {
+    const firstImageData = "QUFB"
+    const secondImageData = "QkJC"
     state.models = {
       object: "list",
       data: [
@@ -493,8 +495,11 @@ describe("responses handler token usage", () => {
       ],
     }
     const handleMessages = mock(
-      (_context: Context, _payload: AnthropicMessagesPayload) =>
-        Promise.resolve(
+      (_context: Context, messagesPayload: AnthropicMessagesPayload) => {
+        const serializedPayload = JSON.stringify(messagesPayload)
+        expect(serializedPayload).toContain(firstImageData)
+        expect(serializedPayload).toContain(secondImageData)
+        return Promise.resolve(
           Response.json({
             content: [{ type: "text", text: "hi" }],
             id: "msg-codex-native",
@@ -505,14 +510,29 @@ describe("responses handler token usage", () => {
             type: "message",
             usage: { input_tokens: 4, output_tokens: 2 },
           }),
-        ),
+        )
+      },
     )
     responsesMessagesDependencies.handleCompletionPayload = handleMessages
 
     const response = await createApp().request("/v1/responses", {
       body: JSON.stringify({
         model: "claude-responses",
-        input: "hello",
+        input: [
+          {
+            content: [
+              {
+                image_url: `data:image/png;base64,${firstImageData}`,
+                type: "input_image",
+              },
+              {
+                image_url: `data:image/png;base64,${secondImageData}`,
+                type: "input_image",
+              },
+            ],
+            role: "user",
+          },
+        ],
       }),
       headers: {
         "content-type": "application/json",
@@ -660,7 +680,7 @@ describe("responses handler token usage", () => {
     )
   })
 
-  test("uses websocket transport by default for dual-endpoint models", async () => {
+  test("uses HTTP transport by default for dual-endpoint models", async () => {
     state.models = {
       object: "list",
       data: [
@@ -693,7 +713,7 @@ describe("responses handler token usage", () => {
 
     expect(response.status).toBe(200)
     expect(createResponses).toHaveBeenCalledTimes(1)
-    expect(createResponses.mock.calls[0][1]?.transport).toBe("websocket")
+    expect(createResponses.mock.calls[0][1]?.transport).toBe("http")
     expect(createResponses.mock.calls[0][1]?.initiator).toBe("user")
     expect(createResponses.mock.calls[0][1]?.subagentMarker).toBeNull()
   })
@@ -723,6 +743,42 @@ describe("responses handler token usage", () => {
       body: JSON.stringify({
         input: "hello",
         model: "gpt-test",
+      }),
+      headers: {
+        "content-type": "application/json",
+      },
+      method: "POST",
+    })
+
+    expect(response.status).toBe(200)
+    expect(createResponses).toHaveBeenCalledTimes(1)
+    expect(createResponses.mock.calls[0][1]?.transport).toBe("http")
+  })
+
+  test("keeps HTTP transport for gpt-5.5 even when websocket is enabled", async () => {
+    state.models = {
+      object: "list",
+      data: [
+        {
+          capabilities: {
+            limits: {
+              max_prompt_tokens: 128000,
+            },
+          },
+          id: "gpt-5.5",
+          supported_endpoints: ["/responses", "ws:/responses"],
+        },
+      ],
+    } as typeof state.models
+    createResponses.mockImplementation((payload) =>
+      Promise.resolve(createResponsesResult(payload.model)),
+    )
+
+    const app = createApp()
+    const response = await app.request("/v1/responses", {
+      body: JSON.stringify({
+        input: "hello",
+        model: "gpt-5.5",
       }),
       headers: {
         "content-type": "application/json",
@@ -951,7 +1007,7 @@ describe("responses handler token usage", () => {
 
   for (const [transport, supportedEndpoints] of [
     ["http", ["/responses"]],
-    ["websocket", ["/responses", "ws:/responses"]],
+    ["websocket", ["ws:/responses"]],
   ] as const) {
     test(`sanitizes unsupported Copilot input fields before the ${transport} transport`, async () => {
       state.models = {
@@ -1295,6 +1351,74 @@ describe("responses handler token usage", () => {
     expect(createResponses.mock.calls[0][0].context_management).toBeUndefined()
   })
 
+  test("aliases reserved image_gen namespace upstream and restores it in response", async () => {
+    createResponses.mockImplementation((payload) =>
+      Promise.resolve({
+        ...createResponsesResult(payload.model),
+        output: [
+          {
+            arguments: "{}",
+            call_id: "call-image",
+            name: "generate",
+            namespace: "copilot_api_user_image_gen",
+            type: "function_call",
+          },
+        ],
+      }),
+    )
+
+    const app = createApp()
+    const response = await app.request("/v1/responses", {
+      body: JSON.stringify({
+        input: [
+          {
+            arguments: "{}",
+            call_id: "call-image",
+            name: "generate",
+            namespace: "image_gen",
+            type: "function_call",
+          },
+        ],
+        model: "gpt-test",
+        tools: [
+          {
+            name: "image_gen",
+            tools: [
+              {
+                name: "generate",
+                parameters: {},
+                strict: false,
+                type: "function",
+              },
+            ],
+            type: "namespace",
+          },
+        ],
+      }),
+      headers: {
+        "content-type": "application/json",
+      },
+      method: "POST",
+    })
+
+    expect(response.status).toBe(200)
+    expect(createResponses).toHaveBeenCalledTimes(1)
+    expect(createResponses.mock.calls[0][0].tools?.[0]).toMatchObject({
+      name: "copilot_api_user_image_gen",
+      type: "namespace",
+    })
+    expect(
+      (
+        createResponses.mock.calls[0][0].input as Array<{ namespace?: string }>
+      )[0].namespace,
+    ).toBe("copilot_api_user_image_gen")
+
+    const body = (await response.json()) as {
+      output: Array<{ namespace?: string }>
+    }
+    expect(body.output[0].namespace).toBe("image_gen")
+  })
+
   test("disables context management for gpt-6 models even when responses context management is enabled", async () => {
     state.models = {
       object: "list",
@@ -1542,7 +1666,7 @@ describe("responses handler token usage", () => {
     }
   })
 
-  test("omits oversized input images before forwarding to Copilot Responses", async () => {
+  test("keeps current input images regardless of model image size metadata", async () => {
     state.models = {
       object: "list",
       data: [
@@ -1589,6 +1713,7 @@ describe("responses handler token usage", () => {
 
     expect(response.status).toBe(200)
     expect(createResponses).toHaveBeenCalledTimes(1)
+    const originalImageUrl = `data:image/png;base64,${"A".repeat(16)}`
     const image = (
       createResponses.mock.calls[0][0].input as Array<{
         content: Array<{
@@ -1600,12 +1725,12 @@ describe("responses handler token usage", () => {
       }>
     )[0].content[1]
     expect(image.type).toBe("input_image")
-    expect(image.detail).toBe("low")
-    expect(image.image_url?.startsWith("data:image/png;base64,")).toBe(true)
+    expect(image.detail).toBeUndefined()
+    expect(image.image_url).toBe(originalImageUrl)
     expect(image.text).toBeUndefined()
   })
 
-  test("preserves multiple input images before forwarding to Copilot Responses", async () => {
+  test("replaces historical images when the latest user message has images", async () => {
     state.models = {
       object: "list",
       data: [
@@ -1615,7 +1740,7 @@ describe("responses handler token usage", () => {
               max_prompt_tokens: 128000,
               vision: {
                 max_prompt_image_size: 1024,
-                max_prompt_images: 1,
+                max_prompt_images: 5,
               },
             },
           },
@@ -1630,6 +1755,77 @@ describe("responses handler token usage", () => {
 
     const firstImageUrl = `data:image/png;base64,${"A".repeat(8)}`
     const secondImageUrl = `data:image/png;base64,${"B".repeat(8)}`
+
+    const app = createApp()
+    const response = await app.request("/v1/responses", {
+      body: JSON.stringify({
+        input: [
+          {
+            content: [
+              {
+                detail: "low",
+                image_url: firstImageUrl,
+                type: "input_image",
+              },
+            ],
+            role: "user",
+          },
+          {
+            content: [{ text: "done", type: "output_text" }],
+            role: "assistant",
+          },
+          {
+            content: [
+              {
+                detail: "low",
+                image_url: secondImageUrl,
+                type: "input_image",
+              },
+            ],
+            role: "user",
+          },
+        ],
+        model: "gpt-test",
+      }),
+      headers: {
+        "content-type": "application/json",
+      },
+      method: "POST",
+    })
+
+    expect(response.status).toBe(200)
+    expect(createResponses).toHaveBeenCalledTimes(1)
+    const forwarded = JSON.stringify(createResponses.mock.calls[0][0].input)
+    expect(forwarded).not.toContain(firstImageUrl)
+    expect(forwarded).toContain(secondImageUrl)
+    expect(forwarded).toContain("data:image/png;base64,")
+  })
+
+  test("does not apply an HTTP payload image limit", async () => {
+    responsesApiWebSocketEnabled = false
+    state.models = {
+      object: "list",
+      data: [
+        {
+          capabilities: {
+            limits: {
+              max_prompt_tokens: 128000,
+              vision: {
+                max_prompt_image_size: 1_000_000,
+              },
+            },
+          },
+          id: "gpt-5.5",
+          supported_endpoints: ["/responses", "ws:/responses"],
+        },
+      ],
+    } as typeof state.models
+    createResponses.mockImplementation((payload) =>
+      Promise.resolve(createResponsesResult(payload.model)),
+    )
+
+    const firstImageUrl = `data:image/png;base64,${"A".repeat(600_000)}`
+    const secondImageUrl = `data:image/png;base64,${"B".repeat(600_000)}`
 
     const app = createApp()
     const response = await app.request("/v1/responses", {
@@ -1652,7 +1848,7 @@ describe("responses handler token usage", () => {
             role: "user",
           },
         ],
-        model: "gpt-test",
+        model: "gpt-5.5",
       }),
       headers: {
         "content-type": "application/json",
@@ -1662,16 +1858,11 @@ describe("responses handler token usage", () => {
 
     expect(response.status).toBe(200)
     expect(createResponses).toHaveBeenCalledTimes(1)
-    expect(createResponses.mock.calls[0][0].input).toEqual([
-      {
-        content: [
-          { text: "look", type: "input_text" },
-          { detail: "low", image_url: firstImageUrl, type: "input_image" },
-          { detail: "low", image_url: secondImageUrl, type: "input_image" },
-        ],
-        role: "user",
-      },
-    ])
+    expect(createResponses.mock.calls[0][1]?.transport).toBe("http")
+    const forwarded = JSON.stringify(createResponses.mock.calls[0][0])
+    expect(forwarded).toContain(firstImageUrl)
+    expect(forwarded).toContain(secondImageUrl)
+    expect(forwarded.length).toBeGreaterThan(1_000_000)
   })
 
   test("records usage from failed streaming responses and falls back to interaction id", async () => {

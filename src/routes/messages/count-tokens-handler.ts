@@ -7,6 +7,7 @@ import {
   getClaudeTokenMultiplier,
   resolveMappedModel,
 } from "~/lib/config"
+import { recordDiagnosticRequestBody } from "~/lib/error-artifacts"
 import { createFallbackModel } from "~/lib/provider-model"
 import { resolveConfiguredProviderModelAlias } from "~/lib/provider-resolver"
 import { getTokenCount } from "~/lib/tokenizer"
@@ -90,6 +91,7 @@ async function countTokensViaAnthropic(
  */
 export async function handleCountTokens(c: Context) {
   const anthropicPayload = await c.req.json<AnthropicMessagesPayload>()
+  recordDiagnosticRequestBody(anthropicPayload)
   anthropicPayload.model = resolveMappedModel(anthropicPayload.model)
   normalizeSystemMessages(anthropicPayload)
 

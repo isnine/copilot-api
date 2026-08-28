@@ -387,7 +387,29 @@ describe("provider messages web_search", () => {
       },
       body: JSON.stringify({
         max_tokens: 128,
-        messages: [{ role: "user", content: "hello" }],
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "image",
+                source: {
+                  type: "base64",
+                  media_type: "image/png",
+                  data: "QUFB",
+                },
+              },
+              {
+                type: "image",
+                source: {
+                  type: "base64",
+                  media_type: "image/png",
+                  data: "QkJC",
+                },
+              },
+            ],
+          },
+        ],
         model: "gpt-search",
       }),
     })
@@ -400,9 +422,12 @@ describe("provider messages web_search", () => {
 
     const upstreamBody = JSON.parse((init as RequestInit).body as string) as {
       context_management?: unknown
+      input: Array<{ content: Array<Record<string, unknown>> }>
       model: string
     }
     expect(upstreamBody.model).toBe("gpt-search")
+    expect(JSON.stringify(upstreamBody.input)).toContain("QUFB")
+    expect(JSON.stringify(upstreamBody.input)).toContain("QkJC")
     expect(upstreamBody.context_management).toEqual([
       {
         compact_threshold: 170000,
@@ -473,7 +498,33 @@ describe("provider messages web_search", () => {
       },
       body: JSON.stringify({
         max_tokens: 128,
-        messages: [{ role: "user", content: "What is the Node.js LTS?" }],
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: "What is the Node.js LTS?",
+              },
+              {
+                type: "image",
+                source: {
+                  type: "base64",
+                  media_type: "image/png",
+                  data: "QUFB",
+                },
+              },
+              {
+                type: "image",
+                source: {
+                  type: "base64",
+                  media_type: "image/png",
+                  data: "QkJC",
+                },
+              },
+            ],
+          },
+        ],
         model: "gpt-search",
         tools: [webSearchTool],
       }),
@@ -486,12 +537,15 @@ describe("provider messages web_search", () => {
     expect(url).toBe("https://provider.example/v1/responses")
 
     const upstreamBody = JSON.parse((init as RequestInit).body as string) as {
+      input: Array<{ content: Array<Record<string, unknown>> }>
       model: string
       stream?: boolean
       tool_choice?: unknown
       tools?: Array<Record<string, unknown>>
     }
     expect(upstreamBody.model).toBe("gpt-search")
+    expect(JSON.stringify(upstreamBody.input)).toContain("QUFB")
+    expect(JSON.stringify(upstreamBody.input)).toContain("QkJC")
     expect(upstreamBody.stream).toBe(true)
     expect(upstreamBody.tool_choice).toBeUndefined()
     expect(upstreamBody.tools).toEqual([

@@ -2,6 +2,7 @@ import { Hono, type Context } from "hono"
 
 import type { ResolvedProviderConfig } from "~/lib/config"
 import { forwardError } from "~/lib/error"
+import { recordDiagnosticRequestBody } from "~/lib/error-artifacts"
 import { createHandlerLogger, debugJson, debugJsonAsync } from "~/lib/logger"
 import { resolveProviderConfig } from "~/lib/provider-resolver"
 import {
@@ -31,6 +32,11 @@ export async function handleCodexImages(
   operation: CodexImagesOperation,
   resolvedProviderConfig?: ResolvedProviderConfig,
 ): Promise<Response> {
+  recordDiagnosticRequestBody({
+    operation,
+    ...getContentMetadata(c.req.raw.headers),
+  })
+
   try {
     const codexProviderConfig =
       resolvedProviderConfig ?? (await resolveProviderConfig("codex"))

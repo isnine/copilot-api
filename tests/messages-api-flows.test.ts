@@ -903,7 +903,7 @@ test("messages Messages flow records Copilot AIU from non-streaming response", a
   })
 })
 
-test("messages Responses flow uses websocket transport by default for dual-endpoint models", async () => {
+test("messages Responses flow uses HTTP transport by default for dual-endpoint models", async () => {
   const payload: AnthropicMessagesPayload = {
     max_tokens: 128,
     messages: [{ role: "user", content: "hello" }],
@@ -918,7 +918,7 @@ test("messages Responses flow uses websocket transport by default for dual-endpo
 
   expect(response.status).toBe(200)
   expect(createResponses).toHaveBeenCalledTimes(1)
-  expect(capturedResponsesOptions?.transport).toBe("websocket")
+  expect(capturedResponsesOptions?.transport).toBe("http")
 })
 
 test("messages Responses flow adds context management by default", async () => {
@@ -981,6 +981,24 @@ test("messages Responses flow keeps HTTP transport for dual-endpoint models when
   expect(capturedResponsesOptions?.transport).toBe("http")
 })
 
+test("messages Responses flow keeps HTTP transport for gpt-5.5 even when websocket is enabled", async () => {
+  const payload: AnthropicMessagesPayload = {
+    max_tokens: 128,
+    messages: [{ role: "user", content: "hello" }],
+    model: "gpt-5.5",
+  }
+
+  const response = await handleWithResponsesApi(createContext(), payload, {
+    logger,
+    requestId: "request-1",
+    selectedModel: createModel(["/responses", "ws:/responses"], "gpt-5.5"),
+  })
+
+  expect(response.status).toBe(200)
+  expect(createResponses).toHaveBeenCalledTimes(1)
+  expect(capturedResponsesOptions?.transport).toBe("http")
+})
+
 test("messages Responses flow keeps HTTP transport for compact requests", async () => {
   const payload: AnthropicMessagesPayload = {
     max_tokens: 128,
@@ -1018,7 +1036,7 @@ test("messages Responses flow keeps HTTP transport for /responses-only models", 
   expect(capturedResponsesOptions?.transport).toBe("http")
 })
 
-test("messages Responses flow keeps streaming transport for deferred tool search", async () => {
+test("messages Responses flow keeps HTTP streaming transport for deferred tool search", async () => {
   const payload: AnthropicMessagesPayload = {
     max_tokens: 128,
     stream: true,
@@ -1046,7 +1064,7 @@ test("messages Responses flow keeps streaming transport for deferred tool search
   expect(response.status).toBe(200)
   expect(createResponses).toHaveBeenCalledTimes(1)
   expect(capturedResponsesPayload?.stream).toBe(true)
-  expect(capturedResponsesOptions?.transport).toBe("websocket")
+  expect(capturedResponsesOptions?.transport).toBe("http")
 })
 
 test("messages Responses flow preserves the configured tool_search alias in non-streaming responses", async () => {
@@ -1122,30 +1140,35 @@ test("messages Responses flow preserves the configured tool_search alias in non-
 
 const createModel = (
   supportedEndpoints: Array<string>,
-  options: { reasoningEffort?: Array<string> } = {},
-): Model => ({
-  capabilities: {
-    family: "gpt",
-    limits: {
-      max_prompt_tokens: 128000,
+  optionsOrId: { reasoningEffort?: Array<string> } | string = {},
+): Model => {
+  const id = typeof optionsOrId === "string" ? optionsOrId : "gpt-test"
+  const options = typeof optionsOrId === "string" ? {} : optionsOrId
+
+  return {
+    capabilities: {
+      family: "gpt",
+      limits: {
+        max_prompt_tokens: 128000,
+      },
+      object: "model_capabilities",
+      supports:
+        options.reasoningEffort === undefined ?
+          {}
+        : { reasoning_effort: options.reasoningEffort },
+      tokenizer: "o200k_base",
+      type: "chat",
     },
-    object: "model_capabilities",
-    supports:
-      options.reasoningEffort === undefined ?
-        {}
-      : { reasoning_effort: options.reasoningEffort },
-    tokenizer: "o200k_base",
-    type: "chat",
-  },
-  id: "gpt-test",
-  model_picker_enabled: true,
-  name: "gpt-test",
-  object: "model",
-  preview: false,
-  supported_endpoints: supportedEndpoints,
-  vendor: "openai",
-  version: "1",
-})
+    id,
+    model_picker_enabled: true,
+    name: "gpt-test",
+    object: "model",
+    preview: false,
+    supported_endpoints: supportedEndpoints,
+    vendor: "openai",
+    version: "1",
+  }
+}
 
 const createMessagesResult = (model: string): AnthropicResponse => ({
   content: [],

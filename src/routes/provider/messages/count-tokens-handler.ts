@@ -1,5 +1,6 @@
 import type { Context, Env } from "hono"
 
+import { recordDiagnosticRequestBody } from "~/lib/error-artifacts"
 import { createHandlerLogger } from "~/lib/logger"
 import { resolveProviderConfig } from "~/lib/provider-resolver"
 import { createFallbackModel } from "~/lib/provider-model"
@@ -15,6 +16,7 @@ export async function handleProviderCountTokens(
 ): Promise<Response> {
   const provider = c.req.param("provider")
   const payload = await c.req.json<AnthropicMessagesPayload>()
+  recordDiagnosticRequestBody(payload)
   return await handleProviderCountTokensForProvider(c, { payload, provider })
 }
 

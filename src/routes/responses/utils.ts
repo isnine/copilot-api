@@ -83,16 +83,16 @@ export const getResponsesTransportForModel = (
   const useWebSocket =
     responsesUtilsDependencies.isResponsesApiWebSocketEnabled()
 
+  if (supportedEndpoints.includes(RESPONSES_ENDPOINT)) {
+    return "http"
+  }
+
   if (
     options.compactType !== COMPACT_REQUEST
     && useWebSocket
     && supportedEndpoints.includes(RESPONSES_WS_ENDPOINT)
   ) {
     return "websocket"
-  }
-
-  if (supportedEndpoints.includes(RESPONSES_ENDPOINT)) {
-    return "http"
   }
 
   return null
@@ -117,7 +117,6 @@ export const hasVisionInput = (payload: ResponsesPayload): boolean => {
   return values.some((item) => containsVisionContent(item))
 }
 
-const DATA_URL_PREFIX = "data:"
 // Static 96x32 PNG reading "Image too large / Redacted".
 const REDACTED_IMAGE_PLACEHOLDER_DATA_URL =
   "data:image/png;base64,"
@@ -170,31 +169,39 @@ export const sanitizeUnsupportedInputFields = (
   return removedFieldCount
 }
 
-export const sanitizeOversizedInputImages = (
+export const replaceHistoricalInputImagesWithPlaceholders = (
   payload: ResponsesPayload,
-  maxPromptImageSize?: number,
 ): number => {
-  const limit =
-    typeof maxPromptImageSize === "number" && maxPromptImageSize > 0 ?
-      maxPromptImageSize
-    : undefined
-
-  if (limit === undefined || !Array.isArray(payload.input)) {
-    return 0
-  }
-
-  return sanitizeInputImages(
-    payload.input,
-    (image) => image.decodedBytes > limit,
-  )
-}
-
-export const sanitizeAllInputImages = (payload: ResponsesPayload): number => {
   if (!Array.isArray(payload.input)) {
     return 0
   }
 
-  return sanitizeInputImages(payload.input, () => true)
+  let latestUserMessageIndex = -1
+  for (let index = payload.input.length - 1; index >= 0; index -= 1) {
+    const item = payload.input[index]
+    if (isResponseInputMessage(item) && item.role.toLowerCase() === "user") {
+      latestUserMessageIndex = index
+      break
+    }
+  }
+  if (latestUserMessageIndex === -1) {
+    return 0
+  }
+
+  const currentImages: Array<InputImageRecord> = []
+  collectInputItemImages(payload.input[latestUserMessageIndex], currentImages)
+  if (currentImages.length === 0) {
+    return 0
+  }
+
+  const historicalImages = collectInputImages(
+    payload.input.slice(0, latestUserMessageIndex),
+  )
+  for (const image of historicalImages) {
+    replaceInputImageWithPlaceholder(image)
+  }
+
+  return historicalImages.length
 }
 
 export const normalizeInputImageDetails = (
@@ -206,106 +213,97 @@ export const normalizeInputImageDetails = (
 
   let normalizedCount = 0
   for (const image of collectInputImages(payload.input)) {
+    if (image.record.type !== "input_image") {
+      continue
+    }
+    const record = image.record
     if (
-      image.detail === undefined
-      || VALID_INPUT_IMAGE_DETAILS.has(image.detail)
+      record.detail === undefined
+      || VALID_INPUT_IMAGE_DETAILS.has(record.detail)
     ) {
       continue
     }
 
-    image.detail = "auto"
+    record.detail = "auto"
     normalizedCount += 1
   }
 
   return normalizedCount
 }
 
-interface InputImageDataUrl {
-  decodedBytes: number
-  record: ResponseInputImage
+interface InputImageRecord {
+  record: ResponseInputImage | ResponseComputerScreenshot
 }
 
-const sanitizeInputImages = (
-  input: Array<ResponseInputItem>,
-  shouldReplace: (image: InputImageDataUrl) => boolean,
-): number => {
-  let count = 0
-  for (const record of collectInputImages(input)) {
-    const image = getInputImageDataUrl(record)
-    if (!image) {
-      continue
-    }
-
-    if (!shouldReplace(image)) {
-      continue
-    }
-
-    replaceInputImageWithPlaceholder(image)
-    count += 1
-  }
-
-  return count
+interface ResponseComputerScreenshot {
+  image_url: string
+  type: "computer_screenshot"
 }
 
 const collectInputImages = (
   input: Array<ResponseInputItem>,
-  images: Array<ResponseInputImage> = [],
-): Array<ResponseInputImage> => {
+  images: Array<InputImageRecord> = [],
+): Array<InputImageRecord> => {
   for (const item of input) {
-    if (isResponseInputMessage(item)) {
-      collectContentImages(item.content, images)
-    } else if (isResponseFunctionCallOutputItem(item)) {
-      collectContentImages(item.output, images)
-    }
+    collectInputItemImages(item, images)
   }
 
   return images
 }
 
+const collectInputItemImages = (
+  item: ResponseInputItem,
+  images: Array<InputImageRecord>,
+): void => {
+  if (isResponseInputMessage(item)) {
+    collectContentImages(item.content, images)
+  } else if (isResponseFunctionCallOutputItem(item)) {
+    collectContentImages(item.output, images)
+  } else if (isResponseCustomToolCallOutputItem(item)) {
+    collectContentImages(item.output, images)
+  } else if (isResponseComputerCallOutputItem(item)) {
+    const image = getInputImage(item.output)
+    if (image) {
+      images.push(image)
+    }
+  }
+}
+
 const collectContentImages = (
   content: string | Array<ResponseInputContent> | undefined,
-  images: Array<ResponseInputImage>,
+  images: Array<InputImageRecord>,
 ): void => {
   if (!Array.isArray(content)) {
     return
   }
 
   for (const block of content) {
-    if (isResponseInputImage(block)) {
-      images.push(block)
+    const image = getInputImage(block)
+    if (image) {
+      images.push(image)
     }
   }
 }
 
-const getInputImageDataUrl = (
-  image: ResponseInputImage,
-): InputImageDataUrl | null => {
-  if (typeof image.image_url !== "string") {
+const getInputImage = (
+  content: ResponseInputContent | ResponseComputerScreenshot,
+): InputImageRecord | null => {
+  if (
+    !isResponseInputImage(content)
+    && !isResponseComputerScreenshot(content)
+  ) {
     return null
   }
 
-  const imageUrl = image.image_url
-  if (!imageUrl.startsWith(DATA_URL_PREFIX)) {
-    return null
-  }
-
-  const decodedBytes = estimateDataUrlByteLength(imageUrl)
-
-  return {
-    decodedBytes,
-    record: image,
-  }
+  return { record: content }
 }
 
-const estimateDataUrlByteLength = (value: string): number => {
-  return Math.max(0, Math.floor((value.length * 3) / 4))
-}
-
-const replaceInputImageWithPlaceholder = (image: InputImageDataUrl): void => {
-  image.record.type = "input_image"
+const replaceInputImageWithPlaceholder = (image: InputImageRecord): void => {
   image.record.image_url = REDACTED_IMAGE_PLACEHOLDER_DATA_URL
-  image.record.detail = "low"
-  delete image.record.file_id
+  if (image.record.type === "input_image") {
+    image.record.detail = "low"
+    delete image.record.file_id
+  }
 }
 
 const VALID_INPUT_IMAGE_DETAILS: ReadonlySet<
@@ -325,26 +323,63 @@ const isResponseInputMessage = (
 
 const isResponseFunctionCallOutputItem = (
   item: ResponseInputItem,
-): item is
-  | ResponseCustomToolCallOutputItem
-  | ResponseFunctionCallOutputItem => {
+): item is ResponseFunctionCallOutputItem => {
   return (
     typeof item === "object"
     && item !== null
     && "type" in item
-    && (item.type === "custom_tool_call_output"
-      || item.type === "function_call_output")
+    && item.type === "function_call_output"
+  )
+}
+
+const isResponseCustomToolCallOutputItem = (
+  item: ResponseInputItem,
+): item is ResponseCustomToolCallOutputItem => {
+  return (
+    typeof item === "object"
+    && item !== null
+    && "type" in item
+    && item.type === "custom_tool_call_output"
+  )
+}
+
+const isResponseComputerCallOutputItem = (
+  item: ResponseInputItem,
+): item is ResponseInputItem & {
+  output: ResponseComputerScreenshot
+  type: "computer_call_output"
+} => {
+  return (
+    typeof item === "object"
+    && item !== null
+    && "type" in item
+    && item.type === "computer_call_output"
+    && "output" in item
+    && isResponseComputerScreenshot(item.output)
   )
 }
 
 const isResponseInputImage = (
-  content: ResponseInputContent,
+  content: ResponseInputContent | ResponseComputerScreenshot,
 ): content is ResponseInputImage => {
   return (
     typeof content === "object"
     && content !== null
     && "type" in content
     && content.type === "input_image"
+  )
+}
+
+const isResponseComputerScreenshot = (
+  content: unknown,
+): content is ResponseComputerScreenshot => {
+  return (
+    typeof content === "object"
+    && content !== null
+    && "type" in content
+    && content.type === "computer_screenshot"
+    && "image_url" in content
+    && typeof content.image_url === "string"
   )
 }
 
@@ -524,6 +559,10 @@ const containsVisionContent = (value: unknown): boolean => {
 
   if (Array.isArray(record.content)) {
     return record.content.some((entry) => containsVisionContent(entry))
+  }
+
+  if (Array.isArray(record.output)) {
+    return record.output.some((entry) => containsVisionContent(entry))
   }
 
   return false

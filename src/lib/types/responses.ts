@@ -258,7 +258,7 @@ export interface ResponsesResult {
   created_at: number
   model: string
   output: Array<ResponseOutputItem>
-  output_text: string
+  output_text: string | null
   status: string
   copilot_usage?: CopilotUsage | null
   usage?: ResponseUsage | null

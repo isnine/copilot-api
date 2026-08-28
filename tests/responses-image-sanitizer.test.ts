@@ -2,22 +2,16 @@ import { describe, expect, test } from "bun:test"
 
 import type {
   ResponseCustomToolCallOutputItem,
-  ResponseFunctionCallOutputItem,
   ResponseInputImage,
   ResponsesPayload,
 } from "~/lib/types/responses"
 
 import {
   normalizeInputImageDetails,
-  sanitizeAllInputImages,
-  sanitizeOversizedInputImages,
+  replaceHistoricalInputImagesWithPlaceholders,
 } from "~/routes/responses/utils"
 
-const imageDataUrl = (base64Length: number): string =>
-  `data:image/png;base64,${"A".repeat(base64Length)}`
-
-const tinyPngDataUrl =
-  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+const imageDataUrl = (value: string): string => `data:image/png;base64,${value}`
 
 const makePayload = (imageUrl: string): ResponsesPayload =>
   ({
@@ -33,64 +27,59 @@ const makePayload = (imageUrl: string): ResponsesPayload =>
     model: "gpt-test",
   }) as unknown as ResponsesPayload
 
-describe("sanitizeOversizedInputImages", () => {
-  test("replaces oversized input images with placeholder images", () => {
-    const payload = makePayload(tinyPngDataUrl)
+describe("replaceHistoricalInputImagesWithPlaceholders", () => {
+  test("replaces images before the latest user message with images", () => {
+    const oldImageUrl = imageDataUrl("OLD")
+    const newImageUrl = imageDataUrl("NEW")
+    const payload = {
+      input: [
+        {
+          content: [{ image_url: oldImageUrl, type: "input_image" }],
+          role: "user",
+        },
+        {
+          content: [{ text: "done", type: "output_text" }],
+          role: "assistant",
+        },
+        {
+          content: [{ image_url: newImageUrl, type: "input_image" }],
+          role: "user",
+        },
+      ],
+      model: "gpt-test",
+    } as unknown as ResponsesPayload
 
-    const sanitized = sanitizeOversizedInputImages(payload, 67)
-
-    expect(sanitized).toBe(1)
-    const image = (
+    const replaced = replaceHistoricalInputImagesWithPlaceholders(payload)
+    const serialized = JSON.stringify(payload)
+    const replacedImage = (
       payload.input as Array<{
         content: Array<{
           detail?: string
           image_url?: string
-          text?: string
           type: string
         }>
       }>
-    )[0].content[1]
-    expect(image.type).toBe("input_image")
-    expect(image.detail).toBe("low")
-    expect(image.image_url?.startsWith("data:image/png;base64,")).toBe(true)
-    expect(image.image_url).not.toBe(tinyPngDataUrl)
-    expect(image.text).toBeUndefined()
+    )[0].content[0]
+
+    expect(replaced).toBe(1)
+    expect(serialized).not.toContain(oldImageUrl)
+    expect(serialized).toContain(newImageUrl)
+    expect(replacedImage.type).toBe("input_image")
+    expect(replacedImage.detail).toBe("low")
+    expect(replacedImage.image_url?.startsWith("data:image/png;base64,")).toBe(
+      true,
+    )
   })
 
-  test("keeps input images within the estimated data URL size limit", () => {
-    const imageUrl = imageDataUrl(8)
-    const payload = makePayload(imageUrl)
-
-    const sanitized = sanitizeOversizedInputImages(payload, 22)
-
-    expect(sanitized).toBe(0)
-    expect(
-      (
-        payload.input as Array<{
-          content: Array<{ detail?: string; image_url?: string; type: string }>
-        }>
-      )[0].content[1],
-    ).toEqual({ detail: "low", image_url: imageUrl, type: "input_image" })
-  })
-
-  test("replaces all input images for a retry after payload rejection", () => {
-    const firstImageUrl = imageDataUrl(1024)
-    const secondImageUrl = imageDataUrl(1024)
+  test("keeps every image in the latest user message", () => {
+    const firstImageUrl = imageDataUrl("FIRST")
+    const secondImageUrl = imageDataUrl("SECOND")
     const payload = {
       input: [
         {
           content: [
-            { text: "look", type: "input_text" },
-            {
-              detail: "low",
-              image_url: firstImageUrl,
-              type: "input_image",
-            },
-            {
-              detail: "low",
-              image_url: secondImageUrl,
-              type: "input_image",
-            },
+            { image_url: firstImageUrl, type: "input_image" },
+            { image_url: secondImageUrl, type: "input_image" },
           ],
           role: "user",
         },
@@ -98,99 +87,69 @@ describe("sanitizeOversizedInputImages", () => {
       model: "gpt-test",
     } as unknown as ResponsesPayload
 
-    const sanitized = sanitizeAllInputImages(payload)
+    const replaced = replaceHistoricalInputImagesWithPlaceholders(payload)
 
-    expect(sanitized).toBe(2)
-    expect(JSON.stringify(payload)).not.toContain(firstImageUrl)
-    expect(JSON.stringify(payload)).not.toContain(secondImageUrl)
-    expect(JSON.stringify(payload)).toContain("data:image/png;base64")
+    expect(replaced).toBe(0)
+    expect(JSON.stringify(payload)).toContain(firstImageUrl)
+    expect(JSON.stringify(payload)).toContain(secondImageUrl)
   })
 
-  test("estimates image size from the full data URL string", () => {
-    const payload = makePayload(imageDataUrl(4))
-
-    const sanitized = sanitizeOversizedInputImages(payload, 10)
-
-    expect(sanitized).toBe(1)
-  })
-
-  test("sanitizes images inside function call outputs", () => {
-    const toolImageUrl = imageDataUrl(128)
-    const toolOutputImage: ResponseInputImage = {
-      detail: "high",
-      image_url: toolImageUrl,
-      type: "input_image",
-    }
+  test("replaces historical tool images and screenshots", () => {
+    const toolImageUrl = imageDataUrl("TOOL")
+    const screenshotUrl = imageDataUrl("SCREENSHOT")
+    const newImageUrl = imageDataUrl("NEW")
     const payload = {
       input: [
         {
-          call_id: "call_123",
-          output: [toolOutputImage],
-          status: "completed",
+          call_id: "call_1",
+          output: [{ image_url: toolImageUrl, type: "input_image" }],
           type: "function_call_output",
-        } satisfies ResponseFunctionCallOutputItem,
-      ],
-      model: "gpt-test",
-    } satisfies ResponsesPayload
-
-    const sanitized = sanitizeOversizedInputImages(payload, 64)
-
-    expect(sanitized).toBe(1)
-    expect(toolOutputImage.type).toBe("input_image")
-    expect(toolOutputImage.detail).toBe("low")
-    expect(
-      toolOutputImage.image_url?.startsWith("data:image/png;base64,"),
-    ).toBe(true)
-    expect(toolOutputImage.image_url).not.toBe(toolImageUrl)
-  })
-
-  test("sanitizes images inside custom tool call outputs", () => {
-    const toolImageUrl = imageDataUrl(128)
-    const toolOutputImage: ResponseInputImage = {
-      detail: "high",
-      image_url: toolImageUrl,
-      type: "input_image",
-    }
-    const payload = {
-      input: [
+        },
         {
-          call_id: "call_123",
-          output: [toolOutputImage],
-          status: "completed",
-          type: "custom_tool_call_output",
-        } satisfies ResponseCustomToolCallOutputItem,
+          call_id: "call_2",
+          output: {
+            image_url: screenshotUrl,
+            type: "computer_screenshot",
+          },
+          type: "computer_call_output",
+        },
+        {
+          content: [{ image_url: newImageUrl, type: "input_image" }],
+          role: "user",
+        },
       ],
-      model: "gpt-test",
-    } satisfies ResponsesPayload
-
-    const sanitized = sanitizeOversizedInputImages(payload, 64)
-
-    expect(sanitized).toBe(1)
-    expect(toolOutputImage.type).toBe("input_image")
-    expect(toolOutputImage.detail).toBe("low")
-    expect(
-      toolOutputImage.image_url?.startsWith("data:image/png;base64,"),
-    ).toBe(true)
-    expect(toolOutputImage.image_url).not.toBe(toolImageUrl)
-  })
-
-  test("does not normalize image detail while checking image sizes", () => {
-    const imageUrl = imageDataUrl(8)
-    const image: ResponseInputImage = {
-      detail: "ultra" as ResponseInputImage["detail"],
-      image_url: imageUrl,
-      type: "input_image",
-    }
-    const payload = {
-      input: [{ content: [image], role: "user" }],
       model: "gpt-test",
     } as unknown as ResponsesPayload
 
-    const sanitized = sanitizeOversizedInputImages(payload, 64)
+    const replaced = replaceHistoricalInputImagesWithPlaceholders(payload)
+    const serialized = JSON.stringify(payload)
 
-    expect(sanitized).toBe(0)
-    expect(image.detail as unknown).toBe("ultra")
-    expect(image.image_url).toBe(imageUrl)
+    expect(replaced).toBe(2)
+    expect(serialized).not.toContain(toolImageUrl)
+    expect(serialized).not.toContain(screenshotUrl)
+    expect(serialized).toContain(newImageUrl)
+  })
+
+  test("does not replace images when the latest user message has no image", () => {
+    const oldImageUrl = imageDataUrl("OLD")
+    const payload = {
+      input: [
+        {
+          content: [{ image_url: oldImageUrl, type: "input_image" }],
+          role: "user",
+        },
+        {
+          content: [{ text: "continue", type: "input_text" }],
+          role: "user",
+        },
+      ],
+      model: "gpt-test",
+    } as unknown as ResponsesPayload
+
+    const replaced = replaceHistoricalInputImagesWithPlaceholders(payload)
+
+    expect(replaced).toBe(0)
+    expect(JSON.stringify(payload)).toContain(oldImageUrl)
   })
 })
 
@@ -198,7 +157,7 @@ describe("normalizeInputImageDetails", () => {
   test("normalizes unsupported detail values to auto", () => {
     const image: ResponseInputImage = {
       detail: "ultra" as ResponseInputImage["detail"],
-      image_url: imageDataUrl(8),
+      image_url: imageDataUrl("IMAGE"),
       type: "input_image",
     }
     const payload = {
@@ -214,7 +173,7 @@ describe("normalizeInputImageDetails", () => {
 
   test("keeps images without a detail value unset", () => {
     const image: ResponseInputImage = {
-      image_url: imageDataUrl(8),
+      image_url: imageDataUrl("IMAGE"),
       type: "input_image",
     }
     const payload = {
@@ -229,7 +188,7 @@ describe("normalizeInputImageDetails", () => {
   })
 
   test("keeps supported detail values unchanged", () => {
-    const payload = makePayload(imageDataUrl(8))
+    const payload = makePayload(imageDataUrl("IMAGE"))
 
     const normalized = normalizeInputImageDetails(payload)
 
@@ -246,7 +205,7 @@ describe("normalizeInputImageDetails", () => {
   test("normalizes detail values inside custom tool call outputs", () => {
     const toolOutputImage: ResponseInputImage = {
       detail: "original" as ResponseInputImage["detail"],
-      image_url: imageDataUrl(8),
+      image_url: imageDataUrl("IMAGE"),
       type: "input_image",
     }
     const payload = {

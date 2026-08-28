@@ -22,6 +22,7 @@ import { isCodexUserAgent } from "~/routes/models/codex-models"
 import {
   applyResponsesApiContextManagement,
   compactInputByLatestCompaction,
+  replaceHistoricalInputImagesWithPlaceholders,
 } from "~/routes/responses/utils"
 import { handleResponsesViaMessages } from "~/routes/responses/messages-handler"
 import { normalizeProviderResponsesReasoningEffort } from "~/routes/provider/utils"
@@ -90,6 +91,11 @@ export async function handleProviderResponsesForProvider(
       `Normalized reasoning effort from ${normalizedReasoningEffort.from} to ${normalizedReasoningEffort.to} based on the provider model configuration`,
     )
   }
+  const model =
+    providerConfig.name === "codex" ?
+      getCodexModels().data.find((model) => model.id === payload.model)
+    : undefined
+  replaceHistoricalInputImagesWithPlaceholders(payload)
 
   if (shouldFallbackToMessages(c, payload.model, effectiveType)) {
     return await handleResponsesViaMessages(c, {
@@ -110,11 +116,6 @@ export async function handleProviderResponsesForProvider(
       400,
     )
   }
-
-  const model =
-    providerConfig.name === "codex" ?
-      getCodexModels().data.find((model) => model.id === payload.model)
-    : undefined
 
   // Smaller than the client compaction threshold, use server-side compaction to maintain cache hit rate.
   const shouldCompactInput = applyResponsesApiContextManagement(
